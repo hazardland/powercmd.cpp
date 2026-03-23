@@ -1,3 +1,3 @@
 pcmd.exe
 *.zip
-.claude/
+.claude/settings.local.json
