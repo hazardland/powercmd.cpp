@@ -10,7 +10,7 @@ Windows developers have always had a rough deal on the terminal front. Microsoft
 
 So the question became: why not build exactly what I need, nothing more?
 
-`cmd.exe` is not hopeless. Microsoft added `↑` to browse history. They added Tab completion for the current folder. They were *this close*. But they never taught it to save history to a file on exit. They never added `cd ../` tab completion. They never added color to `dir`. Tiny things. Maddening things.
+`cmd.exe` is not helpless. Microsoft added `↑` to browse history. They added Tab completion for the current folder. They were *this close*. But they never taught it to save history to a file on exit. They never added `cd ../` tab completion. They never added color to `dir`. Tiny things. Maddening things.
 
 What I was actually missing:
 
@@ -23,7 +23,7 @@ What I was actually missing:
 - **`pwd`, `which`** — small tools that should just exist
 - **Multiline paste** — pasting a curl command from Chrome without the terminal losing its mind
 
-Built it from scratch in C++ with the help of Claude. Single file, no dependencies, Windows SDK only. The process was surprisingly dopamine-driven — each feature was a small, satisfying puzzle: *what is the next useful thing I can add without stealing a millisecond of startup time?* That constraint kept everything honest.
+Built it from scratch in C++ with the help of Claude. Single file, no dependencies, Windows SDK only. The process was surprisingly dopamine-driven — each feature was a small, satisfying puzzle: *what is the next useful thing I can add without stealing a millisecond of startup time?* That constraint kept everything honest — every feature had to earn its place without adding a millisecond to startup or execution.
 
 ## Architecture
 
@@ -97,7 +97,6 @@ Point your profile's command line directly at `pcmd.exe`:
 ```json
 {
     "commandline": "d:/src/powerline/pcmd.exe",
-    "fontFace": "JetBrains Mono"
 }
 ```
 
