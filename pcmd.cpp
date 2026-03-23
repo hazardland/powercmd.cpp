@@ -7,6 +7,7 @@
 #include <cwctype>
 #include <fstream>
 #include <sstream>
+#include <unordered_set>
 
 #ifndef VERSION_MINOR
 #define VERSION_MINOR 0
@@ -246,6 +247,7 @@ struct editor {
     std::vector<std::wstring> hist;
     int hist_idx  = -1;
     std::wstring saved;
+    bool plain_nav = false;   // after accepting hint, travel full history without filtering
     std::wstring hint;        // gray ghost text suggestion from history
 
     bool tab_on = false;
@@ -361,26 +363,31 @@ std::string readline(editor& e) {
                 out("\r\n\x1b[2K> "); // \x1b[2K clears the line (erases any "More?" ConHost may have echoed)
                 continue;
             }
+            if (e.hist_idx != -1 && !e.hint.empty()) e.buf += e.hint; // accept nav hint on Enter
             e.hint.clear(); redraw(e); // clear ghost text before submitting
             out("\r\n");
             std::wstring full = e.full_cmd + e.buf;
             std::string line = to_utf8(full);
-            if (!full.empty() && (e.hist.empty() || e.hist.back() != full))
+            if (!full.empty()) {
+                e.hist.erase(std::remove(e.hist.begin(), e.hist.end(), full), e.hist.end());
                 e.hist.push_back(full);
+            }
             e.buf.clear();
             e.full_cmd.clear();
-            e.pos      = 0;
-            e.hist_idx = -1;
+            e.pos       = 0;
+            e.hist_idx  = -1;
+            e.saved.clear();
+            e.plain_nav = false;
             return line;
         }
 
         if (vk == VK_BACK) {
-            if (e.pos > 0) { e.buf.erase(e.pos - 1, 1); e.pos--; find_hint(e); redraw(e); }
+            if (e.pos > 0) { e.hist_idx = -1; e.plain_nav = false; e.buf.erase(e.pos - 1, 1); e.pos--; find_hint(e); redraw(e); }
             continue;
         }
 
         if (vk == VK_DELETE) {
-            if (e.pos < (int)e.buf.size()) { e.buf.erase(e.pos, 1); find_hint(e); redraw(e); }
+            if (e.pos < (int)e.buf.size()) { e.hist_idx = -1; e.plain_nav = false; e.buf.erase(e.pos, 1); find_hint(e); redraw(e); }
             continue;
         }
 
@@ -398,19 +405,25 @@ std::string readline(editor& e) {
             } else if (e.pos < (int)e.buf.size()) {
                 e.pos++;
             } else if (!e.hint.empty()) {
-                // accept hint
+                // accept hint — exit nav mode so further UP/DOWN is plain
                 e.buf += e.hint;
                 e.pos = (int)e.buf.size();
                 e.hint.clear();
+                e.hist_idx = -1;
+                e.saved.clear();
+                e.plain_nav = true;
             }
             redraw(e); continue;
         }
         if (vk == VK_HOME)  { e.pos = 0;                          redraw(e); continue; }
         if (vk == VK_END) {
             if (e.pos == (int)e.buf.size() && !e.hint.empty()) {
-                // accept hint
+                // accept hint — exit nav mode so further UP/DOWN is plain
                 e.buf += e.hint;
                 e.hint.clear();
+                e.hist_idx = -1;
+                e.saved.clear();
+                e.plain_nav = true;
             }
             e.pos = (int)e.buf.size();
             redraw(e); continue;
@@ -418,19 +431,63 @@ std::string readline(editor& e) {
 
         if (vk == VK_UP) {
             if (e.hist.empty()) continue;
-            if (e.hist_idx == -1) { e.saved = e.buf; e.hist_idx = (int)e.hist.size() - 1; }
-            else if (e.hist_idx > 0) e.hist_idx--;
-            e.buf = e.hist[e.hist_idx];
-            e.pos = (int)e.buf.size(); e.hint.clear();
+            if (e.hist_idx == -1) { e.saved = e.plain_nav ? L"" : e.buf; e.hist_idx = (int)e.hist.size(); }
+            {
+                int n = (int)e.hist.size();
+                int start = (e.hist_idx - 1 + n) % n;  // wrap around
+                if (e.saved.empty()) {
+                    // plain cycle — wrap around, full text in buf
+                    e.hist_idx = start;
+                    e.buf = e.hist[e.hist_idx]; e.hint.clear();
+                } else {
+                    // prefix-filtered with wrap-around
+                    int found = -1;
+                    for (int i = 0; i < n; i++) {
+                        int idx = (e.hist_idx - 1 - i + n) % n;
+                        if (e.hist[idx].substr(0, e.saved.size()) == e.saved) { found = idx; break; }
+                    }
+                    if (found == -1) {
+                        // no matches at all — plain cycle
+                        e.hist_idx = start; e.buf = e.hist[e.hist_idx]; e.hint.clear();
+                    } else {
+                        e.hist_idx = found;
+                        e.buf  = e.saved;
+                        e.hint = e.hist[found].substr(e.saved.size());
+                    }
+                }
+            }
+            e.pos = (int)e.buf.size();
             redraw(e);
             continue;
         }
 
         if (vk == VK_DOWN) {
             if (e.hist_idx == -1) continue;
-            if (e.hist_idx < (int)e.hist.size() - 1) { e.hist_idx++; e.buf = e.hist[e.hist_idx]; }
-            else { e.hist_idx = -1; e.buf = e.saved; }
-            e.pos = (int)e.buf.size(); e.hint.clear();
+            {
+                int n = (int)e.hist.size();
+                int start = (e.hist_idx + 1) % n;  // wrap around
+                if (e.saved.empty()) {
+                    // plain cycle — wrap around, full text in buf
+                    e.hist_idx = start;
+                    e.buf = e.hist[e.hist_idx]; e.hint.clear();
+                } else {
+                    // prefix-filtered with wrap-around
+                    int found = -1;
+                    for (int i = 0; i < n; i++) {
+                        int idx = (e.hist_idx + 1 + i) % n;
+                        if (e.hist[idx].substr(0, e.saved.size()) == e.saved) { found = idx; break; }
+                    }
+                    if (found == -1) {
+                        // no matches at all — plain cycle
+                        e.hist_idx = start; e.buf = e.hist[e.hist_idx]; e.hint.clear();
+                    } else {
+                        e.hist_idx = found;
+                        e.buf  = e.saved;
+                        e.hint = e.hist[found].substr(e.saved.size());
+                    }
+                }
+            }
+            e.pos = (int)e.buf.size();
             redraw(e);
             continue;
         }
@@ -463,7 +520,7 @@ std::string readline(editor& e) {
         }
 
         if (vk == VK_ESCAPE) {
-            e.buf.clear(); e.pos = 0; e.hint.clear(); redraw(e);
+            e.buf.clear(); e.pos = 0; e.hint.clear(); e.hist_idx = -1; e.saved.clear(); redraw(e);
             continue;
         }
 
@@ -476,6 +533,8 @@ std::string readline(editor& e) {
         }
 
         if (ch >= 32 && ch != 127) {
+            e.hist_idx = -1;
+            e.plain_nav = false;
             e.buf.insert(e.pos, 1, ch);
             e.pos++;
             find_hint(e);
@@ -487,6 +546,8 @@ std::string readline(editor& e) {
 
 // ---- commands ----
 
+static std::string prev_dir;
+
 void cd(const std::string& line) {
     std::string args = line.size() > 2 ? line.substr(3) : "";
     // strip /d flag
@@ -497,6 +558,12 @@ void cd(const std::string& line) {
 
     if (args.empty()) { out(cwd() + "\r\n"); return; }
 
+    // cd - : jump to previous directory
+    if (args == "-") {
+        if (prev_dir.empty()) { err("No previous directory.\r\n"); return; }
+        args = prev_dir;
+    }
+
     // expand ~ to %USERPROFILE%
     if (args[0] == '~') {
         char home[MAX_PATH] = {};
@@ -504,8 +571,11 @@ void cd(const std::string& line) {
         args = std::string(home) + args.substr(1);
     }
 
+    std::string before = cwd();
     if (!SetCurrentDirectoryW(to_wide(args).c_str()))
         err("The system cannot find the path specified.\r\n");
+    else
+        prev_dir = before;
 }
 
 static std::string ls_color(const WIN32_FIND_DATAW& fd) {
@@ -632,9 +702,17 @@ std::string history_path() {
 void load_history(editor& e) {
     std::ifstream f(history_path());
     std::string line;
+    std::vector<std::wstring> raw;
     while (std::getline(f, line)) {
-        if (!line.empty()) e.hist.push_back(to_wide(line));
+        if (!line.empty()) raw.push_back(to_wide(line));
     }
+    // deduplicate: keep only the last occurrence of each entry
+    std::unordered_set<std::wstring> seen;
+    for (int i = (int)raw.size() - 1; i >= 0; i--) {
+        if (seen.insert(raw[i]).second)
+            e.hist.push_back(raw[i]);
+    }
+    std::reverse(e.hist.begin(), e.hist.end());
 }
 
 void save_history(const editor& e, size_t loaded) {
@@ -742,8 +820,9 @@ int main() {
             out(
                 GREEN "pwd" RESET "    Print current directory\r\n"
                 GREEN "ls" RESET "     Colored directory listing\r\n"
-                GREEN "cd" RESET "     Change directory (tab completion, ~ support)\r\n"
-                GREEN "which" RESET "  Locate a command in PATH\r\n"
+                GREEN "cd" RESET "     Change directory  ~ home  - prev dir\r\n"
+                GREEN "which" RESET "  Locate a command in PATH or identify built-ins\r\n"
+                GREEN "help" RESET "   Show this help\r\n"
                 GREEN "exit" RESET "   Exit pcmd\r\n"
                 GRAY "All other commands are passed to cmd.exe" RESET "\r\n"
             );
@@ -762,7 +841,7 @@ int main() {
             while (!arg.empty() && arg.front() == ' ') arg.erase(arg.begin());
             std::string argl = arg;
             std::transform(argl.begin(), argl.end(), argl.begin(), ::tolower);
-            static const std::vector<std::string> builtins = {"ls","cd","pwd","exit","which"};
+            static const std::vector<std::string> builtins = {"ls","cd","pwd","exit","which","help"};
             bool found = false;
             for (auto& b : builtins) {
                 if (argl == b) { out(arg + ": pcmd built-in\r\n"); found = true; break; }
