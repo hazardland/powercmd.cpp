@@ -6,6 +6,7 @@
 #include <cstdio>
 #include <cwctype>
 #include <fstream>
+#include <sstream>
 
 #ifndef VERSION_MINOR
 #define VERSION_MINOR 0
@@ -18,6 +19,7 @@
 #define BLUE   "\x1b[38;5;75m"
 #define RED    "\x1b[38;5;203m"
 #define YELLOW "\x1b[38;5;229m"
+#define GREEN  "\x1b[38;5;114m"  // executables (ls color guide)
 #define RESET  "\x1b[0m"
 
 static HANDLE out_h;
@@ -102,7 +104,9 @@ std::string cur_time() {
 std::string cwd() {
     wchar_t buf[MAX_PATH];
     GetCurrentDirectoryW(MAX_PATH, buf);
-    return to_utf8(buf);
+    std::string s = to_utf8(buf);
+    std::replace(s.begin(), s.end(), '\\', '/');
+    return s;
 }
 
 std::string folder(const std::string& path) {
@@ -493,6 +497,13 @@ void cd(const std::string& line) {
 
     if (args.empty()) { out(cwd() + "\r\n"); return; }
 
+    // expand ~ to %USERPROFILE%
+    if (args[0] == '~') {
+        char home[MAX_PATH] = {};
+        GetEnvironmentVariableA("USERPROFILE", home, MAX_PATH);
+        args = std::string(home) + args.substr(1);
+    }
+
     if (!SetCurrentDirectoryW(to_wide(args).c_str()))
         err("The system cannot find the path specified.\r\n");
 }
@@ -511,7 +522,7 @@ static std::string ls_color(const WIN32_FIND_DATAW& fd) {
     // executables — green
     if (ext == L".exe" || ext == L".bat" || ext == L".cmd" ||
         ext == L".ps1" || ext == L".msi")
-        return "\x1b[38;5;114m";
+        return GREEN;
 
     // archives — bold red
     if (ext == L".zip" || ext == L".tar" || ext == L".gz"  || ext == L".tgz" ||
@@ -727,6 +738,70 @@ int main() {
 
         if (lower == "exit") { save_history(e, loaded); break; }
 
+        if (lower == "help") {
+            out(
+                GREEN "pwd" RESET "    Print current directory\r\n"
+                GREEN "ls" RESET "     Colored directory listing\r\n"
+                GREEN "cd" RESET "     Change directory (tab completion, ~ support)\r\n"
+                GREEN "which" RESET "  Locate a command in PATH\r\n"
+                GREEN "exit" RESET "   Exit pcmd\r\n"
+                GRAY "All other commands are passed to cmd.exe" RESET "\r\n"
+            );
+            last_code = 0;
+            continue;
+        }
+
+        if (lower == "pwd") {
+            out(cwd() + "\r\n");
+            last_code = 0;
+            continue;
+        }
+
+        if (lower.size() >= 6 && lower.substr(0, 6) == "which ") {
+            std::string arg = line.substr(6);
+            while (!arg.empty() && arg.front() == ' ') arg.erase(arg.begin());
+            std::string argl = arg;
+            std::transform(argl.begin(), argl.end(), argl.begin(), ::tolower);
+            static const std::vector<std::string> builtins = {"ls","cd","pwd","exit","which"};
+            bool found = false;
+            for (auto& b : builtins) {
+                if (argl == b) { out(arg + ": pcmd built-in\r\n"); found = true; break; }
+            }
+            if (!found) {
+                // get PATHEXT extensions
+                std::vector<std::string> exts;
+                char pathext[4096] = {};
+                GetEnvironmentVariableA("PATHEXT", pathext, sizeof(pathext));
+                std::stringstream pe(pathext);
+                std::string ext;
+                while (std::getline(pe, ext, ';')) {
+                    std::transform(ext.begin(), ext.end(), ext.begin(), ::tolower);
+                    exts.push_back(ext);
+                }
+                if (exts.empty()) exts = {".exe",".cmd",".bat",".com"};
+                // search PATH
+                char path_env[32768] = {};
+                GetEnvironmentVariableA("PATH", path_env, sizeof(path_env));
+                std::stringstream ps(path_env);
+                std::string dir;
+                while (std::getline(ps, dir, ';') && !found) {
+                    if (!dir.empty() && dir.back() != '\\') dir += '\\';
+                    for (auto& e : exts) {
+                        std::string full = dir + arg + e;
+                        if (GetFileAttributesA(full.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                            std::replace(full.begin(), full.end(), '\\', '/');
+                            out(full + "\r\n");
+                            found = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (!found) out(arg + ": not found\r\n");
+            last_code = found ? 0 : 1;
+            continue;
+        }
+
         if (lower == "ls" || (lower.size() >= 3 && lower.substr(0, 3) == "ls ")) {
             do_ls(line.size() >= 3 ? line.substr(3) : "");
             last_code = 0;
@@ -759,8 +834,15 @@ int main() {
             SetConsoleTitleA(cmd_name.c_str());
         }
         ctrl_c_fired = false;
+        ULONGLONG t_start = GetTickCount64();
         last_code = run(line);
+        ULONGLONG elapsed = GetTickCount64() - t_start;
         if (ctrl_c_fired) { out("\r\n"); last_code = 0; }
+        if (!ctrl_c_fired && elapsed >= 2000) {
+            char buf[32];
+            snprintf(buf, sizeof(buf), "%.1fs", elapsed / 1000.0);
+            out(std::string(GRAY) + "[" + buf + "]" + RESET + "\r\n");
+        }
     }
 
     return 0;

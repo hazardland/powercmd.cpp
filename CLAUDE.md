@@ -22,12 +22,22 @@
 - `version.txt` stores the current patch number
 - `build.bat` increments it automatically on each successful build and rolls back on failure
 - User resets or promotes version manually when needed (e.g. `0.1.0`, `1.0.0`)
+- Release titles use `pcmd v0.0.X` format (not "Power CMD v0.0.X")
 
 ## Prompt / UI
 - Tool name: **Power CMD**
 - Prompt format: `[time]folder[branch*]> `
 - Colors: gray=240, blue=75 (normal), red=203 (elevated), yellow=229 (branch)
-- Path separators displayed as `/` (forward slash) in tab completion
+- Path separators displayed as `/` (forward slash) everywhere (prompt, pwd, tab completion)
+
+## Color guide (use consistently across all built-ins)
+- Directories: blue=75
+- Executables / commands: green=114
+- Archives: red=203
+- Images: magenta=\x1b[38;5;170m
+- Audio/video: cyan=\x1b[38;5;51m
+- Hidden files: gray=240
+- These are defined as macros: GRAY, BLUE, RED, YELLOW, GREEN, RESET
 
 ## General
 - No breaking changes without checking with user first
