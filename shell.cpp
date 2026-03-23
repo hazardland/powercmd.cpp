@@ -437,6 +437,121 @@ void cd(const std::string& line) {
         err("The system cannot find the path specified.\r\n");
 }
 
+static std::string ls_color(const WIN32_FIND_DATAW& fd) {
+    bool is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    bool hidden = (fd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0;
+    if (hidden) return GRAY;
+    if (is_dir) return BLUE;
+    std::wstring name = fd.cFileName;
+    size_t dot = name.rfind(L'.');
+    if (dot == std::wstring::npos) return "";
+    std::wstring ext = name.substr(dot);
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+
+    // executables — green
+    if (ext == L".exe" || ext == L".bat" || ext == L".cmd" ||
+        ext == L".ps1" || ext == L".msi")
+        return "\x1b[38;5;114m";
+
+    // archives — bold red
+    if (ext == L".zip" || ext == L".tar" || ext == L".gz"  || ext == L".tgz" ||
+        ext == L".bz2" || ext == L".xz"  || ext == L".7z"  || ext == L".rar" ||
+        ext == L".z"   || ext == L".lz"  || ext == L".lzma"|| ext == L".zst" ||
+        ext == L".deb" || ext == L".rpm" || ext == L".cab" || ext == L".iso")
+        return "\x1b[1;31m";
+
+    // images — bold magenta
+    if (ext == L".jpg"  || ext == L".jpeg" || ext == L".png"  || ext == L".gif"  ||
+        ext == L".bmp"  || ext == L".tif"  || ext == L".tiff" || ext == L".svg"  ||
+        ext == L".webp" || ext == L".ico"  || ext == L".raw"  || ext == L".heic")
+        return "\x1b[1;35m";
+
+    // audio / video — cyan
+    if (ext == L".mp3"  || ext == L".wav"  || ext == L".ogg"  || ext == L".flac" ||
+        ext == L".aac"  || ext == L".m4a"  || ext == L".wma"  ||
+        ext == L".mp4"  || ext == L".mkv"  || ext == L".avi"  || ext == L".mov"  ||
+        ext == L".wmv"  || ext == L".flv"  || ext == L".webm" || ext == L".m4v")
+        return "\x1b[36m";
+
+    return "";
+}
+
+void do_ls(const std::string& arg) {
+    std::string path_s = arg;
+    while (!path_s.empty() && path_s.front() == ' ') path_s.erase(path_s.begin());
+    // skip flags (e.g. -la)
+    if (!path_s.empty() && path_s[0] == '-') {
+        size_t sp = path_s.find(' ');
+        path_s = sp == std::string::npos ? "" : path_s.substr(sp + 1);
+        while (!path_s.empty() && path_s.front() == ' ') path_s.erase(path_s.begin());
+    }
+    // strip surrounding quotes
+    if (path_s.size() >= 2 && path_s.front() == '"' && path_s.back() == '"')
+        path_s = path_s.substr(1, path_s.size() - 2);
+
+    std::wstring wpath = path_s.empty() ? L"." : to_wide(path_s);
+
+    struct entry { std::wstring name; bool is_dir; std::string color; };
+    std::vector<entry> dirs, files;
+
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((wpath + L"\\*").c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        out("ls: cannot access '" + path_s + "'\r\n");
+        return;
+    }
+    do {
+        std::wstring name = fd.cFileName;
+        if (name == L"." || name == L"..") continue;
+        bool is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        entry e = { name, is_dir, ls_color(fd) };
+        (is_dir ? dirs : files).push_back(e);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+
+    auto cmp = [](const entry& a, const entry& b) {
+        std::wstring la = a.name, lb = b.name;
+        std::transform(la.begin(), la.end(), la.begin(), ::towlower);
+        std::transform(lb.begin(), lb.end(), lb.begin(), ::towlower);
+        return la < lb;
+    };
+    std::sort(dirs.begin(), dirs.end(), cmp);
+    std::sort(files.begin(), files.end(), cmp);
+
+    std::vector<entry> all;
+    all.insert(all.end(), dirs.begin(), dirs.end());
+    all.insert(all.end(), files.begin(), files.end());
+    if (all.empty()) return;
+
+    // max display width (name + trailing / for dirs)
+    int max_w = 0;
+    for (auto& e : all) {
+        int w = (int)e.name.size() + (e.is_dir ? 1 : 0);
+        if (w > max_w) max_w = w;
+    }
+    int col_w = max_w + 2;
+    int tw    = term_width();
+    int ncols = std::max(1, tw / col_w);
+    int nrows = ((int)all.size() + ncols - 1) / ncols;
+
+    for (int r = 0; r < nrows; r++) {
+        std::string row;
+        for (int c = 0; c < ncols; c++) {
+            int idx = c * nrows + r;
+            if (idx >= (int)all.size()) break;
+            auto& e = all[idx];
+            std::string disp = to_utf8(e.name) + (e.is_dir ? "/" : "");
+            int pad = col_w - (int)disp.size();
+            if (!e.color.empty()) row += e.color;
+            row += disp;
+            if (!e.color.empty()) row += RESET;
+            bool last = (c == ncols - 1) || (idx + nrows >= (int)all.size());
+            if (!last) row += std::string(std::max(0, pad), ' ');
+        }
+        out(row + "\r\n");
+    }
+}
+
 std::string history_path() {
     wchar_t buf[MAX_PATH];
     GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH);
@@ -537,10 +652,27 @@ int main() {
 
         if (lower == "exit") { save_history(e, loaded); break; }
 
+        if (lower == "ls" || (lower.size() >= 3 && lower.substr(0, 3) == "ls ")) {
+            do_ls(line.size() >= 3 ? line.substr(3) : "");
+            continue;
+        }
+
         if (lower == "cd" || lower.substr(0, 3) == "cd " ||
             (lower.size() >= 6 && lower.substr(0, 6) == "cd /d ")) {
             cd(line);
             continue;
+        }
+
+        // auto-cd: if input is a valid directory path (e.g. src/ from tab/ls), cd into it
+        {
+            std::wstring wpath = to_wide(line);
+            if (!wpath.empty() && (wpath.back() == L'/' || wpath.back() == L'\\'))
+                wpath.pop_back();
+            DWORD attr = GetFileAttributesW(wpath.c_str());
+            if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
+                SetCurrentDirectoryW(wpath.c_str());
+                continue;
+            }
         }
 
         ctrl_c_fired = false;
