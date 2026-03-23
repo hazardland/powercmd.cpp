@@ -1,6 +1,6 @@
-# 2026 UPDAE: pcmd.exe (Moved from batch files to single executable)
+# 2026 UPDATE: pcmd.exe (Moved from batch files to single executable)
 
-![Power CMD](./images/pcmd.png)
+<img src="./images/pcmd.png" width="250" />
 
 ![Power CMD demo](./images/pcmd_cdls.gif)
 
