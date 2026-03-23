@@ -178,7 +178,7 @@ struct prompt_t {
 };
 
 prompt_t make_prompt(bool elev, const std::string& t, const std::string& f,
-                     const std::string& b, bool d) {
+                     const std::string& b, bool d, int code) {
     const char* color = elev ? RED : BLUE;
     std::string s;
     s += GRAY "["; s += t; s += "]";
@@ -189,11 +189,17 @@ prompt_t make_prompt(bool elev, const std::string& t, const std::string& f,
         if (d) s += "*";
         s += RESET "]";
     }
+    if (code != 0) {
+        std::string cs = std::to_string(code);
+        s += RED "["; s += cs; s += "]";
+        s += color;
+    }
     s += color; s += "> ";
     s += RESET;
 
-    int vis = 2 + (int)t.size() + (int)f.size() + 2; // [time]folder> _
+    int vis = 2 + (int)t.size() + (int)f.size() + 2;
     if (!b.empty()) vis += 1 + (int)b.size() + (d ? 1 : 0) + 1;
+    if (code != 0) vis += 1 + (int)std::to_string(code).size() + 1;
     return { s, vis };
 }
 
@@ -319,7 +325,8 @@ std::string readline(editor& e) {
             out("\r\n");
             std::wstring full = e.full_cmd + e.buf;
             std::string line = to_utf8(full);
-            if (!full.empty()) e.hist.push_back(full);
+            if (!full.empty() && (e.hist.empty() || e.hist.back() != full))
+                e.hist.push_back(full);
             e.buf.clear();
             e.full_cmd.clear();
             e.pos      = 0;
@@ -619,6 +626,7 @@ int main() {
     g_editor = &e;
     g_loaded = loaded;
 
+    int last_code = 0;
     while (true) {
         std::string dir  = cwd();
         std::string name = folder(dir);
@@ -633,7 +641,9 @@ int main() {
                 out("\r\n");
         }
 
-        auto p = make_prompt(elev, t, name, b, d);
+        SetConsoleTitleA(name.c_str());
+
+        auto p = make_prompt(elev, t, name, b, d, last_code);
         e.prompt_str  = p.str;
         e.prompt_vis  = p.vis;
         e.prev_pos    = 0;
@@ -654,12 +664,14 @@ int main() {
 
         if (lower == "ls" || (lower.size() >= 3 && lower.substr(0, 3) == "ls ")) {
             do_ls(line.size() >= 3 ? line.substr(3) : "");
+            last_code = 0;
             continue;
         }
 
         if (lower == "cd" || lower.substr(0, 3) == "cd " ||
             (lower.size() >= 6 && lower.substr(0, 6) == "cd /d ")) {
             cd(line);
+            last_code = 0;
             continue;
         }
 
@@ -671,12 +683,18 @@ int main() {
             DWORD attr = GetFileAttributesW(wpath.c_str());
             if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
                 SetCurrentDirectoryW(wpath.c_str());
+                last_code = 0;
                 continue;
             }
         }
 
+        // show command name in title while running, folder name restored next iteration
+        {
+            std::string cmd_name = line.substr(0, line.find(' '));
+            SetConsoleTitleA(cmd_name.c_str());
+        }
         ctrl_c_fired = false;
-        run(line);
+        last_code = run(line);
         if (ctrl_c_fired) out("\r\n");
     }
 
