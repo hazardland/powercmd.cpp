@@ -218,34 +218,62 @@ std::vector<std::wstring> complete(const std::wstring& prefix, bool dirs_only = 
 
 struct editor {
     std::wstring buf;
-    int pos = 0;
+    int pos        = 0;
+    int prev_pos   = 0;       // cursor pos after last redraw (for relative movement)
+    int prompt_vis = 0;
     std::string prompt_str;
     std::vector<std::wstring> hist;
     int hist_idx  = -1;
-    std::wstring saved;       // saved line when browsing history
+    std::wstring saved;
 
     bool tab_on = false;
     std::vector<std::wstring> tab_matches;
-    int tab_idx    = 0;
-    int tab_start  = 0;       // start of token being completed
-    std::wstring tab_pre;     // buf before the token
-    std::wstring tab_suf;     // buf after original cursor pos
+    int tab_idx   = 0;
+    int tab_start = 0;
+    std::wstring tab_pre;
+    std::wstring tab_suf;
 };
 
-void redraw(const editor& e) {
-    std::string buf_utf8 = to_utf8(e.buf);
-    int move_back = (int)e.buf.size() - e.pos;
+int term_width() {
+    CONSOLE_SCREEN_BUFFER_INFO csbi;
+    if (GetConsoleScreenBufferInfo(out_h, &csbi))
+        return csbi.srWindow.Right - csbi.srWindow.Left + 1;
+    return 80;
+}
+
+void redraw(editor& e) {
+    int width   = term_width();
+    // cur_row: how many rows below the prompt start the cursor currently sits
+    int cur_row = (e.prompt_vis + e.prev_pos) / width;
 
     std::string s;
-    s += "\x1b[u";      // restore cursor to saved position (start of input)
-    s += buf_utf8;
-    s += "\x1b[K";      // erase to end of line
-    if (move_back > 0) {
+    // move up to the prompt row
+    if (cur_row > 0) {
         char esc[32];
-        snprintf(esc, sizeof(esc), "\x1b[%dD", move_back);
+        snprintf(esc, sizeof(esc), "\x1b[%dA", cur_row);
         s += esc;
     }
+    s += "\r";           // col 0 of prompt row
+    s += "\x1b[J";       // clear to end of screen
+    s += e.prompt_str;   // reprint prompt
+    s += to_utf8(e.buf); // reprint buffer
+
+    // position cursor at e.pos
+    int end_row = (e.prompt_vis + (int)e.buf.size()) / width;
+    int pos_row = (e.prompt_vis + e.pos) / width;
+    int pos_col = (e.prompt_vis + e.pos) % width;
+    int rows_up = end_row - pos_row;
+    if (rows_up > 0) {
+        char esc[32];
+        snprintf(esc, sizeof(esc), "\x1b[%dA", rows_up);
+        s += esc;
+    }
+    char col[32];
+    snprintf(col, sizeof(col), "\x1b[%dG", pos_col + 1);
+    s += col;
+
     out(s);
+    e.prev_pos = e.pos;
 }
 
 std::string readline(editor& e) {
@@ -282,8 +310,20 @@ std::string readline(editor& e) {
             continue;
         }
 
-        if (vk == VK_LEFT)  { if (e.pos > 0)                    { e.pos--; redraw(e); } continue; }
-        if (vk == VK_RIGHT) { if (e.pos < (int)e.buf.size())    { e.pos++; redraw(e); } continue; }
+        if (vk == VK_LEFT) {
+            if (ctrl) {
+                while (e.pos > 0 && e.buf[e.pos - 1] == L' ') e.pos--;
+                while (e.pos > 0 && e.buf[e.pos - 1] != L' ') e.pos--;
+            } else if (e.pos > 0) e.pos--;
+            redraw(e); continue;
+        }
+        if (vk == VK_RIGHT) {
+            if (ctrl) {
+                while (e.pos < (int)e.buf.size() && e.buf[e.pos] != L' ') e.pos++;
+                while (e.pos < (int)e.buf.size() && e.buf[e.pos] == L' ') e.pos++;
+            } else if (e.pos < (int)e.buf.size()) e.pos++;
+            redraw(e); continue;
+        }
         if (vk == VK_HOME)  { e.pos = 0;                          redraw(e); continue; }
         if (vk == VK_END)   { e.pos = (int)e.buf.size();          redraw(e); continue; }
 
@@ -441,9 +481,10 @@ int main() {
         bool d           = b.empty() ? false : dirty();
 
         auto p = make_prompt(elev, t, name, b, d);
-        e.prompt_str = p.str;
+        e.prompt_str  = p.str;
+        e.prompt_vis  = p.vis;
+        e.prev_pos    = 0;
         out(p.str);
-        out("\x1b[s");  // save cursor (start of user input area)
 
         std::string line = readline(e);
 
