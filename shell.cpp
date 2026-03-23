@@ -57,10 +57,20 @@ void err(const std::string& s) {
 
 static volatile bool ctrl_c_fired = false;
 
+// forward declarations so ctrl_handler can save history on close/shutdown
+struct editor;
+void save_history(const editor&, size_t);
+static editor* g_editor  = nullptr;
+static size_t  g_loaded  = 0;
+
 BOOL WINAPI ctrl_handler(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT) {
         ctrl_c_fired = true;
         return TRUE; // suppress for our process, child still gets it
+    }
+    if (type == CTRL_CLOSE_EVENT || type == CTRL_LOGOFF_EVENT || type == CTRL_SHUTDOWN_EVENT) {
+        if (g_editor) save_history(*g_editor, g_loaded);
+        return FALSE; // let default handler terminate the process
     }
     return FALSE;
 }
@@ -295,7 +305,7 @@ std::string readline(editor& e) {
             // cmd-style line continuation: ^ at end of line
             std::wstring trimmed = e.buf;
             while (!trimmed.empty() && trimmed.back() == L' ') trimmed.pop_back();
-            if (!trimmed.empty() && trimmed.back() == L'^') {
+            if (!trimmed.empty() && (trimmed.back() == L'^' || trimmed.back() == L'\\')) {
                 // commit this segment into full_cmd, start fresh visual line
                 e.full_cmd += trimmed.substr(0, trimmed.size() - 1);
                 e.buf.clear();
@@ -491,6 +501,8 @@ int main() {
     editor e;
     load_history(e);
     size_t loaded = e.hist.size();
+    g_editor = &e;
+    g_loaded = loaded;
 
     while (true) {
         std::string dir  = cwd();
