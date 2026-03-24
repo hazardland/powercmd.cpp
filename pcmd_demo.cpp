@@ -26,9 +26,100 @@ static void demo_overwrite(const std::string& prompt_str, const std::string& buf
     if (!hint_sfx.empty()) out(GRAY + hint_sfx + RESET "\x1b[u");
 }
 
-// Main demo entry point: seeds history, navigates pcmd-demo/, and runs scripted scenes.
-// All filesystem navigation is real; Tab and UP key effects are visually simulated via demo_overwrite.
-// Restores the original working directory when done.
+// Create an empty file at the given wide path.
+static void demo_touch(const std::wstring& path) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+}
+
+// Build the demo folder tree under root and return true on success.
+// Creates directories first, then empty placeholder files.
+static bool demo_setup(const std::string& root) {
+    auto mk  = [](const std::string& p) { return CreateDirectoryW(to_wide(p).c_str(), NULL) != 0; };
+    auto tch = [](const std::string& p) { demo_touch(to_wide(p)); };
+
+    if (!mk(root))                    return false;
+    mk(root + "\\src");
+    mk(root + "\\assets");
+    mk(root + "\\assets\\images");
+    mk(root + "\\assets\\audio");
+    mk(root + "\\assets\\video");
+    mk(root + "\\dist");
+    mk(root + "\\archive");
+    mk(root + "\\docs");
+
+    tch(root + "\\build.bat");
+    tch(root + "\\config.json");
+    tch(root + "\\readme.md");
+    tch(root + "\\src\\main.cpp");
+    tch(root + "\\src\\utils.cpp");
+    tch(root + "\\src\\parser.h");
+    tch(root + "\\assets\\images\\logo.png");
+    tch(root + "\\assets\\images\\banner.jpg");
+    tch(root + "\\assets\\images\\icon.ico");
+    tch(root + "\\assets\\images\\preview.webp");
+    tch(root + "\\assets\\audio\\theme.mp3");
+    tch(root + "\\assets\\audio\\intro.wav");
+    tch(root + "\\assets\\video\\demo.mp4");
+    tch(root + "\\assets\\video\\tutorial.mkv");
+    tch(root + "\\dist\\app.exe");
+    tch(root + "\\dist\\installer.msi");
+    tch(root + "\\dist\\setup.bat");
+    tch(root + "\\dist\\run.cmd");
+    tch(root + "\\archive\\backup.zip");
+    tch(root + "\\archive\\release.tar.gz");
+    tch(root + "\\archive\\source.7z");
+    tch(root + "\\archive\\old.rar");
+    tch(root + "\\docs\\readme.md");
+    tch(root + "\\docs\\changelog.txt");
+    return true;
+}
+
+// Delete all demo files and directories created by demo_setup.
+// Files must be removed before their parent directories.
+static void demo_teardown(const std::string& root) {
+    auto rm  = [](const std::string& p) { DeleteFileW(to_wide(p).c_str()); };
+    auto rmd = [](const std::string& p) { RemoveDirectoryW(to_wide(p).c_str()); };
+
+    rm(root + "\\build.bat");
+    rm(root + "\\config.json");
+    rm(root + "\\readme.md");
+    rm(root + "\\src\\main.cpp");
+    rm(root + "\\src\\utils.cpp");
+    rm(root + "\\src\\parser.h");
+    rm(root + "\\assets\\images\\logo.png");
+    rm(root + "\\assets\\images\\banner.jpg");
+    rm(root + "\\assets\\images\\icon.ico");
+    rm(root + "\\assets\\images\\preview.webp");
+    rm(root + "\\assets\\audio\\theme.mp3");
+    rm(root + "\\assets\\audio\\intro.wav");
+    rm(root + "\\assets\\video\\demo.mp4");
+    rm(root + "\\assets\\video\\tutorial.mkv");
+    rm(root + "\\dist\\app.exe");
+    rm(root + "\\dist\\installer.msi");
+    rm(root + "\\dist\\setup.bat");
+    rm(root + "\\dist\\run.cmd");
+    rm(root + "\\archive\\backup.zip");
+    rm(root + "\\archive\\release.tar.gz");
+    rm(root + "\\archive\\source.7z");
+    rm(root + "\\archive\\old.rar");
+    rm(root + "\\docs\\readme.md");
+    rm(root + "\\docs\\changelog.txt");
+
+    rmd(root + "\\src");
+    rmd(root + "\\assets\\images");
+    rmd(root + "\\assets\\audio");
+    rmd(root + "\\assets\\video");
+    rmd(root + "\\assets");
+    rmd(root + "\\dist");
+    rmd(root + "\\archive");
+    rmd(root + "\\docs");
+    rmd(root);
+}
+
+// Main demo entry point: seeds history, creates a temporary folder tree in %TEMP%,
+// navigates it for scripted scenes, then deletes the tree on exit.
+// Tab and UP key effects are visually simulated via demo_overwrite.
 void demo_run(editor& e) {
     // Seed history for reliable hint / UP-nav demonstrations
     for (const wchar_t* s : {L"ping 8.8.8.8", L"ping github.com", L"ping google.com"}) {
@@ -37,7 +128,16 @@ void demo_run(editor& e) {
         e.hist.push_back(ws);
     }
 
-    const std::string demo_root = "D:\\src\\pcmd-demo";
+    // Build demo root in %TEMP% so no project folders are touched
+    char tmp[MAX_PATH];
+    GetEnvironmentVariableA("TEMP", tmp, sizeof(tmp));
+    const std::string demo_root = std::string(tmp) + "\\pcmd-demo";
+
+    if (!demo_setup(demo_root)) {
+        out(RED "demo: failed to create temp folder " + demo_root + RESET "\r\n");
+        return;
+    }
+
     std::string start_dir = cwd();
     bool elev = elevated();
 
@@ -72,7 +172,7 @@ void demo_run(editor& e) {
     SetCurrentDirectoryW(to_wide(demo_root + "\\docs").c_str());
     demo_pause(500);
 
-    // Show we're in docs, cd back to root with cd -
+    // Show we're in docs, cd back to src with cd -
     out("\r\n"); auto p2 = ppt();
     demo_type("cd -"); demo_pause(450);
     out("\r\n");
@@ -118,13 +218,13 @@ void demo_run(editor& e) {
     // ── Scene 3: ls with colors ────────────────────────────────────────────
     out("\r\n"); ppt();
     demo_type("ls"); demo_pause(450); out("\r\n");
-    do_ls("");
+    ls("");
     demo_pause(2000);
 
     // ls inside images subfolder to show only images (magenta)
     out("\r\n"); ppt();
     demo_type("ls assets/images"); demo_pause(450); out("\r\n");
-    do_ls("assets/images");
+    ls("assets/images");
     demo_pause(1800);
 
     // ── Scene 4: which ─────────────────────────────────────────────────────
@@ -173,4 +273,5 @@ void demo_run(editor& e) {
     // ── Done ───────────────────────────────────────────────────────────────
     out(GRAY "\r\n── demo complete ──" RESET "\r\n\r\n");
     SetCurrentDirectoryW(to_wide(start_dir).c_str());
+    demo_teardown(demo_root);
 }

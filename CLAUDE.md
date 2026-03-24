@@ -42,7 +42,7 @@
 ## General
 - No breaking changes without checking with user first
 - Keep changes simple and focused — no over-engineering
-- Test by compiling to `pcmd2.exe` when `pcmd.exe` is running/locked
+- We `pcmd.exe` is running/locked we can to kill pcmd.exe process but build.bat already includes that flow
 
 ## Postponed ideas
 - **Tab-complete executables from PATH** — postponed: mixing PATH executables with local folder contents in Tab completion is ambiguous and confusing. Tab is for folder/file navigation only.

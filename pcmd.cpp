@@ -50,6 +50,8 @@ std::wstring to_wide(const std::string& s) {
 }
 
 // Write UTF-8 bytes directly to stdout handle; bypasses C runtime buffering so ANSI sequences render immediately.
+// Excluded in test builds — pcmd_test.cpp provides its own stub so tests run without a real console.
+#ifndef PCMD_TEST
 void out(const std::string& s) {
     DWORD w;
     WriteFile(out_h, s.c_str(), (DWORD)s.size(), &w, NULL);
@@ -60,6 +62,7 @@ void err(const std::string& s) {
     DWORD w;
     WriteFile(err_h, s.c_str(), (DWORD)s.size(), &w, NULL);
 }
+#endif
 
 // ---- ctrl+c handler ----
 
@@ -392,12 +395,27 @@ static void nav_step(editor& e, int dir) {
     redraw(e);
 }
 
+// Transitions the editor into history-nav mode on the first UP key press.
+// Snapshots buf as the filter prefix (or empty if plain_nav). If a hint is already visible,
+// anchors hist_idx at that entry so the next nav_step immediately moves past it.
+static void enter_nav(editor& e) {
+    e.saved = e.plain_nav ? L"" : e.buf;
+    e.hist_idx = (int)e.hist.size();
+    if (!e.hint.empty() && !e.saved.empty()) {
+        std::wstring full = e.buf + e.hint;
+        for (int i = (int)e.hist.size() - 1; i >= 0; i--)
+            if (e.hist[i] == full) { e.hist_idx = i; break; }
+    }
+}
+
 // Raw input loop: reads INPUT_RECORDs one at a time (key-down only) and drives the full
 // editor state machine — history navigation, hint accept, tab completion, cursor movement,
 // line continuation, Ctrl+C. Calls redraw after every state change. Returns the completed
 // command on Enter (with nav hint auto-accepted), or empty string on Ctrl+C.
 std::string readline(editor& e) {
     while (true) {
+        // -- read one event, skip everything except key-down --
+        // Mouse moves, key-up events, and window resize records all arrive here; we ignore them.
         INPUT_RECORD ir;
         DWORD count;
         if (!ReadConsoleInputW(in_h, &ir, 1, &count)) break;
@@ -408,14 +426,16 @@ std::string readline(editor& e) {
         DWORD state = ir.Event.KeyEvent.dwControlKeyState;
         bool ctrl   = (state & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
 
+        // Any key other than Tab resets the Tab cycling state.
         if (vk != VK_TAB) e.tab_on = false;
 
+        // -- Enter: submit line --
+        // If buf ends with ^ or \, accumulate into full_cmd and start a continuation line.
+        // Otherwise auto-accept any nav hint, deduplicate + push to history, reset all state, return.
         if (vk == VK_RETURN) {
-            // cmd-style line continuation: ^ at end of line
             std::wstring trimmed = e.buf;
             while (!trimmed.empty() && trimmed.back() == L' ') trimmed.pop_back();
             if (!trimmed.empty() && (trimmed.back() == L'^' || trimmed.back() == L'\\')) {
-                // commit this segment into full_cmd, start fresh visual line
                 e.full_cmd += trimmed.substr(0, trimmed.size() - 1);
                 e.buf.clear();
                 e.pos        = 0;
@@ -443,6 +463,8 @@ std::string readline(editor& e) {
             return line;
         }
 
+        // -- Backspace / Delete: erase a character --
+        // Both exit nav mode and reset plain_nav so the next UP re-filters from the new shorter buf.
         if (vk == VK_BACK) {
             if (e.pos > 0) { e.hist_idx = -1; e.plain_nav = false; e.buf.erase(e.pos - 1, 1); e.pos--; find_hint(e); redraw(e); }
             continue;
@@ -453,6 +475,9 @@ std::string readline(editor& e) {
             continue;
         }
 
+        // -- Left / Right / Home / End: cursor movement --
+        // Ctrl+Left/Right jumps by whole words. Right at the end of buf accepts the hint and
+        // sets plain_nav=true so subsequent UP/DOWN cycles all history unfiltered. End does the same.
         if (vk == VK_LEFT) {
             if (ctrl) {
                 while (e.pos > 0 && e.buf[e.pos - 1] == L' ') e.pos--;
@@ -467,7 +492,6 @@ std::string readline(editor& e) {
             } else if (e.pos < (int)e.buf.size()) {
                 e.pos++;
             } else if (!e.hint.empty()) {
-                // accept hint — exit nav mode so further UP/DOWN is plain
                 e.buf += e.hint;
                 e.pos = (int)e.buf.size();
                 e.hint.clear();
@@ -480,7 +504,6 @@ std::string readline(editor& e) {
         if (vk == VK_HOME)  { e.pos = 0;                          redraw(e); continue; }
         if (vk == VK_END) {
             if (e.pos == (int)e.buf.size() && !e.hint.empty()) {
-                // accept hint — exit nav mode so further UP/DOWN is plain
                 e.buf += e.hint;
                 e.hint.clear();
                 e.hist_idx = -1;
@@ -491,29 +514,27 @@ std::string readline(editor& e) {
             redraw(e); continue;
         }
 
+        // -- UP: step backward through history --
+        // On first press, snapshots buf as the filter prefix (or empty if plain_nav).
+        // If a hint is already visible, anchors at that entry so UP immediately moves past it.
         if (vk == VK_UP) {
             if (e.hist.empty()) continue;
-            if (e.hist_idx == -1) {
-                e.saved = e.plain_nav ? L"" : e.buf;
-                e.hist_idx = (int)e.hist.size();
-                // If hint already shows a history entry, start from that entry so the
-                // first UP moves to the next match instead of re-showing the same one.
-                if (!e.hint.empty() && !e.saved.empty()) {
-                    std::wstring full = e.buf + e.hint;
-                    for (int i = (int)e.hist.size() - 1; i >= 0; i--)
-                        if (e.hist[i] == full) { e.hist_idx = i; break; }
-                }
-            }
+            if (e.hist_idx == -1) enter_nav(e);
             nav_step(e, -1);
             continue;
         }
 
+        // -- DOWN: step forward through history --
+        // No-op in edit mode (hist_idx == -1); only active once UP has been pressed.
         if (vk == VK_DOWN) {
             if (e.hist_idx == -1) continue;
             nav_step(e, +1);
             continue;
         }
 
+        // -- Tab: cycle filesystem completions --
+        // First Tab computes all matches for the token under the cursor and stores pre/suf so
+        // the rest of the line is preserved. Each subsequent Tab advances to the next match.
         if (vk == VK_TAB) {
             if (!e.tab_on) {
                 std::wstring before = e.buf.substr(0, e.pos);
@@ -541,11 +562,15 @@ std::string readline(editor& e) {
             continue;
         }
 
+        // -- Escape: hard reset --
+        // Clears everything — buf, hint, nav state — back to a blank prompt.
         if (vk == VK_ESCAPE) {
             e.buf.clear(); e.pos = 0; e.hint.clear(); e.hist_idx = -1; e.saved.clear(); redraw(e);
             continue;
         }
 
+        // -- Ctrl+C: abort current line --
+        // Prints ^C, discards buf and any continuation segments, returns empty to signal no execution.
         if (ctrl && vk == 'C') {
             out("^C\r\n");
             e.buf.clear();
@@ -554,6 +579,9 @@ std::string readline(editor& e) {
             return "";
         }
 
+        // -- Printable character: insert and recalculate hint --
+        // Exits nav mode (any typed char abandons history browsing) and recomputes the ghost hint
+        // from the new buf so it stays in sync with every keystroke.
         if (ch >= 32 && ch != 127) {
             e.hist_idx = -1;
             e.plain_nav = false;
@@ -646,35 +674,45 @@ static std::string ls_color(const WIN32_FIND_DATAW& fd) {
 
 // Lists a directory with ANSI colors in a column-major grid; directories first (sorted),
 // then files (sorted). Column width is the longest entry + 2; column count fits terminal width.
-void do_ls(const std::string& arg) {
+// Lists a directory with ANSI colors. Flags: -a show hidden, -s size, -t time, -l size+time.
+// -s or -t or -l switches to one-column mode. filter (from | grep / | findstr) is a
+// case-insensitive name substring applied after all other filtering.
+void ls(const std::string& arg, const std::string& filter = "") {
+    // -- parse flags (-a, -s, -t, -l, combined e.g. -al), then path --
+    bool show_all = false, show_size = false, show_time = false;
     std::string path_s = arg;
     while (!path_s.empty() && path_s.front() == ' ') path_s.erase(path_s.begin());
-    // skip flags (e.g. -la)
-    if (!path_s.empty() && path_s[0] == '-') {
+    while (!path_s.empty() && path_s[0] == '-') {
         size_t sp = path_s.find(' ');
+        std::string tok = sp == std::string::npos ? path_s : path_s.substr(0, sp);
+        for (char c : tok.substr(1)) {
+            if (c == 'a') show_all  = true;
+            if (c == 's') show_size = true;
+            if (c == 't') show_time = true;
+            if (c == 'l') { show_size = true; show_time = true; }
+        }
         path_s = sp == std::string::npos ? "" : path_s.substr(sp + 1);
         while (!path_s.empty() && path_s.front() == ' ') path_s.erase(path_s.begin());
     }
-    // strip surrounding quotes
     if (path_s.size() >= 2 && path_s.front() == '"' && path_s.back() == '"')
         path_s = path_s.substr(1, path_s.size() - 2);
 
     std::wstring wpath = path_s.empty() ? L"." : to_wide(path_s);
 
-    struct entry { std::wstring name; bool is_dir; std::string color; };
+    struct entry { std::wstring name; bool is_dir; std::string color; ULONGLONG size; FILETIME mtime; };
     std::vector<entry> dirs, files;
 
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW((wpath + L"\\*").c_str(), &fd);
-    if (h == INVALID_HANDLE_VALUE) {
-        out("ls: cannot access '" + path_s + "'\r\n");
-        return;
-    }
+    if (h == INVALID_HANDLE_VALUE) { out("ls: cannot access '" + path_s + "'\r\n"); return; }
     do {
         std::wstring name = fd.cFileName;
         if (name == L"." || name == L"..") continue;
+        bool hidden = (fd.dwFileAttributes & FILE_ATTRIBUTE_HIDDEN) != 0;
+        if (hidden && !show_all) continue;
         bool is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-        entry e = { name, is_dir, ls_color(fd) };
+        ULONGLONG sz = is_dir ? 0 : (((ULONGLONG)fd.nFileSizeHigh << 32) | fd.nFileSizeLow);
+        entry e = { name, is_dir, ls_color(fd), sz, fd.ftLastWriteTime };
         (is_dir ? dirs : files).push_back(e);
     } while (FindNextFileW(h, &fd));
     FindClose(h);
@@ -691,32 +729,89 @@ void do_ls(const std::string& arg) {
     std::vector<entry> all;
     all.insert(all.end(), dirs.begin(), dirs.end());
     all.insert(all.end(), files.begin(), files.end());
+
+    if (!filter.empty()) {
+        std::wstring wfl = to_wide(filter);
+        std::transform(wfl.begin(), wfl.end(), wfl.begin(), ::towlower);
+        all.erase(std::remove_if(all.begin(), all.end(), [&](const entry& e) {
+            std::wstring nl = e.name;
+            std::transform(nl.begin(), nl.end(), nl.begin(), ::towlower);
+            return nl.find(wfl) == std::wstring::npos;
+        }), all.end());
+    }
+
     if (all.empty()) return;
 
-    // max display width (name + trailing / for dirs)
+    // -- columnar mode (no -s/-t/-l) --
+    if (!show_size && !show_time) {
+        int max_w = 0;
+        for (auto& e : all) {
+            int w = (int)e.name.size() + (e.is_dir ? 1 : 0);
+            if (w > max_w) max_w = w;
+        }
+        int col_w = max_w + 2;
+        int tw    = term_width();
+        int ncols = std::max(1, tw / col_w);
+        int nrows = ((int)all.size() + ncols - 1) / ncols;
+        for (int r = 0; r < nrows; r++) {
+            std::string row;
+            for (int c = 0; c < ncols; c++) {
+                int idx = c * nrows + r;
+                if (idx >= (int)all.size()) break;
+                auto& e = all[idx];
+                std::string disp = to_utf8(e.name) + (e.is_dir ? "/" : "");
+                int pad = col_w - (int)disp.size();
+                if (!e.color.empty()) row += e.color;
+                row += disp;
+                if (!e.color.empty()) row += RESET;
+                bool last = (c == ncols - 1) || (idx + nrows >= (int)all.size());
+                if (!last) row += std::string(std::max(0, pad), ' ');
+            }
+            out(row + "\r\n");
+        }
+        return;
+    }
+
+    // -- one-column mode (-s, -t, or -l) --
+
+    // human-readable size: "42", "1.2K", "3.4M", "1.1G"
+    auto fmt_size = [](ULONGLONG b) -> std::string {
+        if (b < 1024ULL)                  return std::to_string(b);
+        if (b < 1024ULL * 1024)           { char s[16]; snprintf(s, sizeof(s), "%.1fK", b / 1024.0);               return s; }
+        if (b < 1024ULL * 1024 * 1024)    { char s[16]; snprintf(s, sizeof(s), "%.1fM", b / (1024.0*1024));        return s; }
+                                            { char s[16]; snprintf(s, sizeof(s), "%.1fG", b / (1024.0*1024*1024));  return s; }
+    };
+
+    // modification time as "yyyy-mm-dd HH:MM:SS" in local time
+    auto fmt_time = [](FILETIME ft) -> std::string {
+        FILETIME lft; FileTimeToLocalFileTime(&ft, &lft);
+        SYSTEMTIME st; FileTimeToSystemTime(&lft, &st);
+        char s[24];
+        snprintf(s, sizeof(s), "%04d-%02d-%02d %02d:%02d:%02d",
+            st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+        return s;
+    };
+
     int max_w = 0;
     for (auto& e : all) {
         int w = (int)e.name.size() + (e.is_dir ? 1 : 0);
         if (w > max_w) max_w = w;
     }
-    int col_w = max_w + 2;
-    int tw    = term_width();
-    int ncols = std::max(1, tw / col_w);
-    int nrows = ((int)all.size() + ncols - 1) / ncols;
 
-    for (int r = 0; r < nrows; r++) {
+    for (auto& e : all) {
+        std::string name = to_utf8(e.name) + (e.is_dir ? "/" : "");
         std::string row;
-        for (int c = 0; c < ncols; c++) {
-            int idx = c * nrows + r;
-            if (idx >= (int)all.size()) break;
-            auto& e = all[idx];
-            std::string disp = to_utf8(e.name) + (e.is_dir ? "/" : "");
-            int pad = col_w - (int)disp.size();
-            if (!e.color.empty()) row += e.color;
-            row += disp;
-            if (!e.color.empty()) row += RESET;
-            bool last = (c == ncols - 1) || (idx + nrows >= (int)all.size());
-            if (!last) row += std::string(std::max(0, pad), ' ');
+        if (!e.color.empty()) row += e.color;
+        row += name;
+        if (!e.color.empty()) row += RESET;
+        row += std::string(max_w - (int)name.size() + 2, ' ');
+
+        if (show_size) {
+            std::string sz = e.is_dir ? "" : fmt_size(e.size);
+            row += std::string(std::max(0, 6 - (int)sz.size()), ' ') + sz + "  ";
+        }
+        if (show_time) {
+            row += GRAY + fmt_time(e.mtime) + RESET;
         }
         out(row + "\r\n");
     }
@@ -780,7 +875,7 @@ int run(const std::string& line) {
 #endif
 
 // Searches for arg as a built-in or executable in PATH; prints result and returns exit code (0=found, 1=not found).
-int do_which(const std::string& arg) {
+int which(const std::string& arg) {
     std::string argl = arg;
     std::transform(argl.begin(), argl.end(), argl.begin(), ::tolower);
     static const std::vector<std::string> builtins = {"ls","cd","pwd","exit","which","help"
@@ -822,6 +917,7 @@ int do_which(const std::string& arg) {
 
 // ---- main ----
 
+#ifndef PCMD_TEST
 int main() {
     out_h = GetStdHandle(STD_OUTPUT_HANDLE);
     err_h = GetStdHandle(STD_ERROR_HANDLE);
@@ -904,7 +1000,7 @@ int main() {
         if (lower == "help") {
             out(
                 GREEN "pwd" RESET "    Print current directory\r\n"
-                GREEN "ls" RESET "     Colored directory listing\r\n"
+                GREEN "ls" RESET "     Colored listing  -a all  -s size  -t time  -l long  | grep <word>\r\n"
                 GREEN "cd" RESET "     Change directory  ~ home  - prev dir\r\n"
                 GREEN "which" RESET "  Locate a command in PATH or identify built-ins\r\n"
                 GREEN "help" RESET "   Show this help\r\n"
@@ -924,12 +1020,36 @@ int main() {
         if (lower.size() >= 6 && lower.substr(0, 6) == "which ") {
             std::string arg = line.substr(6);
             while (!arg.empty() && arg.front() == ' ') arg.erase(arg.begin());
-            last_code = do_which(arg);
+            last_code = which(arg);
             continue;
         }
 
+        // ls [path] | grep <word>  or  ls [path] | findstr <word>
+        // Intercept before passing to cmd.exe so the built-in ls output is filterable.
         if (lower == "ls" || (lower.size() >= 3 && lower.substr(0, 3) == "ls ")) {
-            do_ls(line.size() >= 3 ? line.substr(3) : "");
+            std::string rest = line.size() >= 3 ? line.substr(3) : "";
+            std::string filter;
+            // detect "| grep <word>" or "| findstr <word>"
+            size_t pipe = rest.find('|');
+            if (pipe != std::string::npos) {
+                std::string rhs = rest.substr(pipe + 1);
+                while (!rhs.empty() && rhs.front() == ' ') rhs.erase(rhs.begin());
+                std::string rhs_lower = rhs;
+                std::transform(rhs_lower.begin(), rhs_lower.end(), rhs_lower.begin(), ::tolower);
+                auto extract_word = [](const std::string& s, size_t skip) {
+                    std::string word = s.substr(skip);
+                    while (!word.empty() && word.front() == ' ') word.erase(word.begin());
+                    size_t sp = word.find(' ');
+                    return sp == std::string::npos ? word : word.substr(0, sp);
+                };
+                if (rhs_lower.size() >= 5 && rhs_lower.substr(0, 5) == "grep ")
+                    filter = extract_word(rhs, 5);
+                else if (rhs_lower.size() >= 8 && rhs_lower.substr(0, 8) == "findstr ")
+                    filter = extract_word(rhs, 8);
+                rest = rest.substr(0, pipe);
+            }
+            while (!rest.empty() && rest.back() == ' ') rest.pop_back();
+            ls(rest, filter);
             last_code = 0;
             continue;
         }
@@ -973,3 +1093,4 @@ int main() {
 
     return 0;
 }
+#endif // PCMD_TEST
