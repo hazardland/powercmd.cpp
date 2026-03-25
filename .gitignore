@@ -1,5 +1,3 @@
-pcmd.exe
+*.exe
 *.zip
 .claude/
-pcmd3.exe
-pcmd_test.exe
