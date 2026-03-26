@@ -137,8 +137,9 @@ std::string folder(const std::string& path) {
 }
 
 // Walks up from cwd looking for .git/HEAD to find the current branch name.
+// Also sets root_out to the repo root (parent of .git) when found.
 // Returns the branch name, a 7-char SHA for detached HEAD, or empty string if not in a git repo.
-std::string branch() {
+std::string branch(std::wstring& root_out) {
     wchar_t dir[MAX_PATH];
     GetCurrentDirectoryW(MAX_PATH, dir);
     std::wstring path = dir;
@@ -151,6 +152,7 @@ std::string branch() {
             DWORD read = 0;
             ReadFile(f, buf, sizeof(buf) - 1, &read, NULL);
             CloseHandle(f);
+            root_out = path;
             std::string s(buf);
             while (!s.empty() && (s.back() == '\n' || s.back() == '\r'))
                 s.pop_back();
@@ -166,36 +168,83 @@ std::string branch() {
     return "";
 }
 
-// Spawns "git status --porcelain" in a hidden window and reads one byte from its output.
-// Returns true if any output exists (repo is dirty); kept fast by not reading the full output.
-bool dirty() {
-    HANDLE pipe_r = NULL, pipe_w = NULL;
-    SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
-    if (!CreatePipe(&pipe_r, &pipe_w, &sa, 0)) return false;
-    SetHandleInformation(pipe_r, HANDLE_FLAG_INHERIT, 0);
+// big-endian helpers for reading git's binary index format (no winsock/ntohl needed)
+static inline uint32_t be32(const char* p) {
+    return ((uint8_t)p[0] << 24) | ((uint8_t)p[1] << 16) | ((uint8_t)p[2] << 8) | (uint8_t)p[3];
+}
+static inline uint16_t be16(const char* p) {
+    return ((uint8_t)p[0] << 8) | (uint8_t)p[1];
+}
 
-    STARTUPINFOA si = {};
-    si.cb = sizeof(si);
-    si.dwFlags    = STARTF_USESTDHANDLES;
-    si.hStdOutput = pipe_w;
-    si.hStdError  = err_h;
-    si.hStdInput  = in_h;
+// Reads .git/index directly and compares each tracked file's cached mtime+size to the real file.
+// Returns true if any tracked file has been modified since it was last staged.
+// No git process is spawned. Staged-only changes (same size/mtime, different content) are not detected.
+bool dirty(const std::wstring& root) {
+    std::wstring index_path = root + L"\\.git\\index";
+    HANDLE f = CreateFileW(index_path.c_str(), GENERIC_READ, FILE_SHARE_READ,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) return false;
 
-    PROCESS_INFORMATION pi = {};
-    char cmd[] = "git.exe status --porcelain";
-    bool ok = CreateProcessA(NULL, cmd, NULL, NULL, TRUE,
-        CREATE_NO_WINDOW, NULL, NULL, &si, &pi);
-    CloseHandle(pipe_w);
-    if (!ok) { CloseHandle(pipe_r); return false; }
-
-    char buf[4] = {};
+    LARGE_INTEGER sz;
+    if (!GetFileSizeEx(f, &sz) || sz.QuadPart < 12 || sz.QuadPart > 64 * 1024 * 1024) {
+        CloseHandle(f); return false;
+    }
+    std::vector<char> data((size_t)sz.QuadPart);
     DWORD n = 0;
-    bool has = ReadFile(pipe_r, buf, 1, &n, NULL) && n > 0;
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    CloseHandle(pi.hProcess);
-    CloseHandle(pi.hThread);
-    CloseHandle(pipe_r);
-    return has;
+    bool ok = ReadFile(f, data.data(), (DWORD)sz.QuadPart, &n, NULL) && n == (DWORD)sz.QuadPart;
+    CloseHandle(f);
+    if (!ok) return false;
+
+    const char* d = data.data();
+    if (memcmp(d, "DIRC", 4) != 0) return false;
+    uint32_t ver   = be32(d + 4);
+    uint32_t count = be32(d + 8);
+    if (ver < 2 || ver > 3) return false; // v4 uses path compression; skip
+
+    size_t pos = 12;
+    for (uint32_t i = 0; i < count; i++) {
+        if (pos + 62 > data.size()) break;
+
+        const char* e       = d + pos;
+        uint32_t mtime_s    = be32(e + 8);
+        uint32_t cached_sz  = be32(e + 36);
+        uint16_t flags      = be16(e + 60);
+        bool extended       = (ver >= 3) && (flags & 0x4000);
+        size_t name_off     = pos + 62 + (extended ? 2 : 0);
+
+        // find null-terminator of the path
+        size_t name_end = name_off;
+        while (name_end < data.size() && d[name_end] != '\0') name_end++;
+
+        // advance pos: entry is padded to 8-byte boundary from its start
+        size_t hdr   = 62 + (extended ? 2 : 0);
+        size_t nlen  = name_end - name_off;
+        size_t entry = hdr + nlen + 1;
+        pos += (entry + 7) & ~(size_t)7;
+
+        // build the full path and stat the file
+        int wlen = MultiByteToWideChar(CP_UTF8, 0, d + name_off, (int)nlen, NULL, 0);
+        if (wlen <= 0) continue;
+        std::wstring rel(wlen, L'\0');
+        MultiByteToWideChar(CP_UTF8, 0, d + name_off, (int)nlen, &rel[0], wlen);
+        for (auto& c : rel) if (c == L'/') c = L'\\';
+
+        WIN32_FILE_ATTRIBUTE_DATA attr;
+        if (!GetFileAttributesExW((root + L"\\" + rel).c_str(), GetFileExInfoStandard, &attr))
+            return true; // deleted tracked file → dirty
+
+        // size mismatch → dirty
+        uint64_t cur_sz = ((uint64_t)attr.nFileSizeHigh << 32) | attr.nFileSizeLow;
+        if (cur_sz != cached_sz) return true;
+
+        // mtime mismatch → dirty (compare seconds; ignore sub-second)
+        ULARGE_INTEGER ft = { attr.ftLastWriteTime.dwLowDateTime, attr.ftLastWriteTime.dwHighDateTime };
+        if (ft.QuadPart >= 116444736000000000ULL) {
+            uint32_t cur_s = (uint32_t)((ft.QuadPart - 116444736000000000ULL) / 10000000ULL);
+            if (cur_s != mtime_s) return true;
+        }
+    }
+    return false;
 }
 
 // ---- prompt ----
@@ -1670,8 +1719,9 @@ int main() {
         std::string dir  = cwd();
         std::string name = folder(dir);
         std::string t    = cur_time();
-        std::string b    = branch();
-        bool d           = b.empty() ? false : dirty();
+        std::wstring git_root;
+        std::string b    = branch(git_root);
+        bool d           = b.empty() ? false : dirty(git_root);
 
         // if cursor is not at column 0, previous output had no trailing newline
         {

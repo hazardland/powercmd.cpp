@@ -2,7 +2,7 @@
 
 <img src="./images/pcmd.png" width="250" />
 
-![Power CMD demo](./images/pcmd_cdls.gif)
+![Power CMD demo](./images/pcmd_cat_video.gif)
 
 ## Why
 
@@ -46,7 +46,7 @@ Windows Terminal
 
 **Prompt**
 - `[time]folder[branch*]>` format with 256-color ANSI
-- Git branch and dirty indicator (reads `.git/HEAD` directly — no process spawn)
+- Git branch and dirty indicator (reads `.git/HEAD` and `.git/index` directly — no process spawn)
 - Exit code shown in red `[1]` when the last command failed, cleared on next success
 - Red folder color when running elevated (admin)
 - Window title shows folder name at rest, command name while running
