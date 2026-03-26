@@ -1293,7 +1293,7 @@ int run(const std::string& line) {
         return -1;
     SetConsoleMode(in_h, orig_in_mode);  // restore so Ctrl+C reaches child
     WaitForSingleObject(pi.hProcess, INFINITE);
-    SetConsoleMode(in_h, ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT);  // back to raw
+    SetConsoleMode(in_h, ENABLE_EXTENDED_FLAGS | ENABLE_QUICK_EDIT_MODE | ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT);  // back to raw
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
@@ -1319,7 +1319,7 @@ int run_bash(const std::string& line) {
         return run(line);
     SetConsoleMode(in_h, orig_in_mode);
     WaitForSingleObject(pi.hProcess, INFINITE);
-    SetConsoleMode(in_h, ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT);
+    SetConsoleMode(in_h, ENABLE_EXTENDED_FLAGS | ENABLE_QUICK_EDIT_MODE | ENABLE_WINDOW_INPUT);
     DWORD code = 0;
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hProcess);
@@ -1923,7 +1923,7 @@ int main() {
 
     // raw input: no line buffer, no echo, no processed ctrl
     GetConsoleMode(in_h, &orig_in_mode);
-    SetConsoleMode(in_h, ENABLE_EXTENDED_FLAGS | ENABLE_WINDOW_INPUT);
+    SetConsoleMode(in_h, ENABLE_EXTENDED_FLAGS | ENABLE_QUICK_EDIT_MODE | ENABLE_WINDOW_INPUT);
 
     SetConsoleCP(65001);
     SetConsoleOutputCP(65001);
