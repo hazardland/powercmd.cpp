@@ -341,6 +341,7 @@ struct editor {
 
 // Calculates the ghost hint for the current buf in edit mode (hist_idx == -1).
 // For "cd <path>" uses filesystem completions (dirs only); for "ls <path>" files+dirs;
+// for bare paths (X:/, ./, ../) uses filesystem completions directly;
 // for everything else scans history backwards so the most recent matching command wins.
 void find_hint(editor& e) {
     e.hint.clear();
@@ -368,6 +369,16 @@ void find_hint(editor& e) {
         auto matches = complete(token, false);
         if (!matches.empty() && matches[0].size() > token.size())
             e.hint = matches[0].substr(token.size());
+        return;
+    }
+    // bare path prefixes: X:/ or ./ or ../
+    bool is_path = (e.buf.size() >= 3 && iswalpha(e.buf[0]) && e.buf[1] == L':' && e.buf[2] == L'/') ||
+                   (e.buf.size() >= 2 && e.buf[0] == L'.' && e.buf[1] == L'/') ||
+                   (e.buf.size() >= 3 && e.buf[0] == L'.' && e.buf[1] == L'.' && e.buf[2] == L'/');
+    if (is_path) {
+        auto matches = complete(e.buf, false);
+        if (!matches.empty() && matches[0].size() > e.buf.size())
+            e.hint = matches[0].substr(e.buf.size());
         return;
     }
     for (int i = (int)e.hist.size() - 1; i >= 0; i--) {
