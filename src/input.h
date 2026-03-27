@@ -1,7 +1,7 @@
 // MODULE: input
 // Purpose : input loop, cursor, multiline, history nav, hint display, tab, paste, redraw
-// Exports : struct input | find_hint() redraw() readline() | term_width() term_height()
-// Depends : common.h, signal.h (ctrl_c_fired), complete.h, append_history() fwd-decl from signal.h
+// Exports : struct input | find_hint() redraw() readline()
+// Depends : common.h, signal.h (ctrl_c_fired), complete.h, terminal.h, append_history() fwd-decl from signal.h
 
 // All mutable state for one input session. hist persists across prompts; all other
 // fields are reset after each Enter so each new line starts clean.
@@ -79,21 +79,6 @@ void find_hint(input& e) {
             return;
         }
     }
-}
-
-// Returns the visible column count of the terminal window; falls back to 80 if not a real console.
-int term_width() {
-    CONSOLE_SCREEN_BUFFER_INFO csbi;
-    if (GetConsoleScreenBufferInfo(out_h, &csbi))
-        return csbi.srWindow.Right - csbi.srWindow.Left + 1;
-    return 80;
-}
-
-int term_height() {
-    CONSOLE_SCREEN_BUFFER_INFO csbi;
-    if (GetConsoleScreenBufferInfo(out_h, &csbi))
-        return csbi.srWindow.Bottom - csbi.srWindow.Top + 1;
-    return 24;
 }
 
 // ---- multiline helpers ----
@@ -271,19 +256,14 @@ static void paste_text(input& e, const wchar_t* raw) {
     redraw(e);
 }
 
-// Reads clipboard CF_UNICODETEXT and passes it to paste_text().
+// Reads clipboard and passes it to paste_text().
 // Flushes the console input queue before and after to discard ConHost's async-injected KEY_EVENTs.
 static void do_paste(input& e) {
     FlushConsoleInputBuffer(in_h);
     Sleep(5);
     FlushConsoleInputBuffer(in_h);
-    if (!OpenClipboard(NULL)) return;
-    HANDLE h = GetClipboardData(CF_UNICODETEXT);
-    if (h) {
-        wchar_t* txt = static_cast<wchar_t*>(GlobalLock(h));
-        if (txt) { paste_text(e, txt); GlobalUnlock(h); }
-    }
-    CloseClipboard();
+    std::wstring text = clipboard_get();
+    if (!text.empty()) paste_text(e, text.c_str());
     FlushConsoleInputBuffer(in_h);
 }
 

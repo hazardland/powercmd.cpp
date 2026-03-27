@@ -1,6 +1,6 @@
 // MODULE: common
-// Purpose : system includes, color macros, version macro, global console handles, UTF-8/wide converters, out/err writers
-// Exports : GRAY BLUE RED YELLOW GREEN RESET VERSION | out_h err_h in_h orig_in_mode | to_utf8() to_wide() out() err()
+// Purpose : system includes, color macros, version macro, global console handles, UTF-8/wide converters, out/err writers, path utils, clipboard
+// Exports : GRAY BLUE RED YELLOW GREEN RESET VERSION | out_h err_h in_h orig_in_mode | to_utf8() to_wide() out() err() | normalize_path() clipboard_get() clipboard_set()
 // Depends : (none — must be first include)
 
 #include <windows.h>
@@ -63,4 +63,40 @@ void out(const std::string& s) {
 void err(const std::string& s) {
     DWORD w;
     WriteFile(err_h, s.c_str(), (DWORD)s.size(), &w, NULL);
+}
+
+// Strip surrounding quotes and normalize forward slashes to backslashes.
+std::string normalize_path(const std::string& path) {
+    std::string p = path;
+    if (p.size() >= 2 && p.front() == '"' && p.back() == '"')
+        p = p.substr(1, p.size() - 2);
+    std::replace(p.begin(), p.end(), '/', '\\');
+    return p;
+}
+
+// Read CF_UNICODETEXT from the clipboard; returns empty string if unavailable.
+std::wstring clipboard_get() {
+    std::wstring result;
+    if (!OpenClipboard(NULL)) return result;
+    HANDLE h = GetClipboardData(CF_UNICODETEXT);
+    if (h) {
+        wchar_t* txt = static_cast<wchar_t*>(GlobalLock(h));
+        if (txt) { result = txt; GlobalUnlock(h); }
+    }
+    CloseClipboard();
+    return result;
+}
+
+// Write a wide string to the clipboard as CF_UNICODETEXT.
+void clipboard_set(const std::wstring& text) {
+    if (!OpenClipboard(NULL)) return;
+    EmptyClipboard();
+    size_t bytes = (text.size() + 1) * sizeof(wchar_t);
+    HGLOBAL hg = GlobalAlloc(GMEM_MOVEABLE, bytes);
+    if (hg) {
+        wchar_t* dst = static_cast<wchar_t*>(GlobalLock(hg));
+        if (dst) { memcpy(dst, text.c_str(), bytes); GlobalUnlock(hg); }
+        SetClipboardData(CF_UNICODETEXT, hg);
+    }
+    CloseClipboard();
 }
