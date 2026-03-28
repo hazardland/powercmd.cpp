@@ -38,6 +38,17 @@ static int utf8_prev(const std::string& s, int pos) {
     return p;
 }
 
+// Number of display columns from byte 0 to byte_pos (each codepoint = 1 col)
+static int utf8_display_col(const std::string& s, int byte_pos) {
+    int col = 0, i = 0;
+    while (i < byte_pos && i < (int)s.size()) {
+        unsigned char c = (unsigned char)s[i];
+        i += (c >= 0xF0) ? 4 : (c >= 0xE0) ? 3 : (c >= 0xC0) ? 2 : 1;
+        col++;
+    }
+    return col;
+}
+
 // ---- Load / save ----
 
 static void load(file_buf& f) {
@@ -135,8 +146,9 @@ static void clamp_scroll(file_buf& f, int vis_rows, int vis_w) {
     if (f.cur_row >= f.top_row + vis_rows)  f.top_row = f.cur_row - vis_rows + 1;
     if (f.top_row < 0) f.top_row = 0;
     if (!f.wrap) {
-        if (f.cur_col < f.left_col)              f.left_col = f.cur_col;
-        if (f.cur_col >= f.left_col + vis_w)     f.left_col = f.cur_col - vis_w + 1;
+        int dc = utf8_display_col(f.lines[f.cur_row], f.cur_col);
+        if (dc < f.left_col)              f.left_col = dc;
+        if (dc >= f.left_col + vis_w)     f.left_col = dc - vis_w + 1;
         if (f.left_col < 0) f.left_col = 0;
     }
 }
@@ -178,8 +190,8 @@ static std::vector<row_info> build_screen(const file_buf& f, int vis_rows, int v
     v.reserve(vis_rows);
     for (int fr = f.top_row; fr < (int)f.lines.size() && (int)v.size() < vis_rows; fr++) {
         if (f.wrap) {
-            int len    = (int)f.lines[fr].size();
-            int chunks = (len == 0) ? 1 : (len + vis_w - 1) / vis_w;
+            int disp   = utf8_display_col(f.lines[fr], (int)f.lines[fr].size());
+            int chunks = (disp == 0) ? 1 : (disp + vis_w - 1) / vis_w;
             for (int c = 0; c < chunks && (int)v.size() < vis_rows; c++)
                 v.push_back({fr, c * vis_w});
         } else {
@@ -286,9 +298,9 @@ static std::string render_content(const std::string& raw, int col_start, int vis
 
     if (!has_sel || fr < ar || fr > br) return clipped;
 
-    // selection bounds in visible-space coords
-    int ss = (fr == ar) ? ac : 0;
-    int se = (fr == br) ? bc : (int)raw.size();
+    // selection bounds in visible-space coords (convert byte offsets to display cols)
+    int ss = (fr == ar) ? utf8_display_col(raw, ac) : 0;
+    int se = (fr == br) ? utf8_display_col(raw, bc) : utf8_display_col(raw, (int)raw.size());
     int vis_ss = std::max(0, ss - col_start);
     int vis_se = std::min(vis_w, se - col_start);
 
@@ -370,14 +382,15 @@ static void draw(const file_buf& f, lang l) {
     // cursor position
     {
         int sc_row = 1, sc_col = GUTTER + 1;
+        int dc = utf8_display_col(f.lines[f.cur_row], f.cur_col);
         for (int sr = 0; sr < (int)rows.size(); sr++) {
             const row_info& ri = rows[sr];
             if (ri.file_row != f.cur_row) continue;
             int next_cs = (sr + 1 < (int)rows.size() && rows[sr + 1].file_row == f.cur_row)
                           ? rows[sr + 1].col_start : INT_MAX;
-            if (f.cur_col >= ri.col_start && f.cur_col < next_cs) {
+            if (dc >= ri.col_start && dc < next_cs) {
                 sc_row = sr + 1;
-                sc_col = GUTTER + (f.cur_col - ri.col_start) + 1;
+                sc_col = GUTTER + (dc - ri.col_start) + 1;
                 break;
             }
         }
