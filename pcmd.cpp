@@ -17,6 +17,7 @@
 #include "src/highlight.h" // detect_lang, colorize_inline, colorize_line
 #include "src/cat.h"      // cat
 #include "src/edit.h"     // edit_file()
+#include "src/matrix.h"  // matrix()
 
 int main() {
     out_h = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -153,6 +154,7 @@ int main() {
                 "        Video files (mp4 mkv avi mov webm) played inline  Esc/Ctrl+C to stop  requires ffmpeg\r\n"
                 GREEN "edit" RESET "    Edit a file  edit path/to/file\r\n"
                 GREEN "terminfo" RESET " Print terminal columns and rows\r\n"
+                GREEN "matrix" RESET "   Matrix digital rain screensaver  any key to exit\r\n"
                 GREEN "which" RESET "   Locate a command in PATH or identify built-ins\r\n"
                 GREEN "alias" RESET "   alias ll=ls -l  define · alias ll  show · alias  list all\r\n"
                 GREEN "unalias" RESET " Remove an alias\r\n"
@@ -166,6 +168,12 @@ int main() {
 
         if (lower == "version") {
             out("pcmd v" VERSION "\r\n");
+            last_code = 0;
+            continue;
+        }
+
+        if (lower == "matrix") {
+            matrix();
             last_code = 0;
             continue;
         }
