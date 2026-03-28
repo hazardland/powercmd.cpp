@@ -86,8 +86,9 @@ static void top_cmd() {
     int  scroll_top = 0;
     bool fmode      = false;
     std::string fstr;
-    bool needs_clear   = true;
+    bool needs_clear      = true;
     bool prev_show_filter = false;
+    bool kill_pending     = false;
 
     std::unordered_map<DWORD,uint64_t> prev_times;
     ULONGLONG prev_wall = GetTickCount64();
@@ -296,20 +297,29 @@ static void top_cmd() {
         }
         F+="\x1b[J"; // clear any leftover rows
 
-        // Row n-1 / n — Path bar (shows full cmdline of selected process)
+        // Row n-1 / n — Path bar or kill confirm
         {
             F+=GRAY;
             for (int i=0;i<cols;i++) F+="\xe2\x94\x80";
             F+="\x1b[0m\r\n";
-            std::string pathline;
-            if (!filtered.empty()) {
+            if (kill_pending && !filtered.empty()) {
                 const proc_entry& sel_p=*filtered[sel];
-                std::string p=!sel_p.cmdline.empty()?sel_p.cmdline:(!sel_p.path.empty()?sel_p.path:sel_p.name);
-                for (auto& c:p) if (c=='\\') c='/';
-                if ((int)p.size()>cols-2) p=p.substr(0,cols-2);
-                pathline=" "+std::string(GRAY)+p+RESET;
+                char conf[512];
+                snprintf(conf,sizeof(conf),
+                    "\x1b[48;5;170m\x1b[30m  Kill %s (PID %lu)? [Y/N]  " RESET,
+                    sel_p.name.c_str(),(unsigned long)sel_p.pid);
+                F+=std::string(conf);
+            } else {
+                std::string pathline;
+                if (!filtered.empty()) {
+                    const proc_entry& sel_p=*filtered[sel];
+                    std::string p=!sel_p.cmdline.empty()?sel_p.cmdline:(!sel_p.path.empty()?sel_p.path:sel_p.name);
+                    for (auto& c:p) if (c=='\\') c='/';
+                    if ((int)p.size()>cols-2) p=p.substr(0,cols-2);
+                    pathline=" "+std::string(GRAY)+p+RESET;
+                }
+                F+=pathline;
             }
-            F+=pathline;
             F+="\x1b[K\x1b[0m";
         }
 
@@ -350,6 +360,16 @@ static void top_cmd() {
                         redraw=true; continue;
                     }
 
+                    // Kill confirm mode
+                    if (kill_pending) {
+                        wchar_t kch=towlower(wch);
+                        if (kch=='y'&&!filtered.empty()) {
+                            HANDLE kh=OpenProcess(PROCESS_TERMINATE,FALSE,filtered[sel]->pid);
+                            if (kh){TerminateProcess(kh,1);CloseHandle(kh);}
+                        }
+                        kill_pending=false; redraw=true; continue;
+                    }
+
                     // Normal mode
                     if (ch=='q'||vk==VK_ESCAPE) goto done;
                     if (ch=='m') { sort_by='m'; redraw=true; }
@@ -369,34 +389,7 @@ static void top_cmd() {
                         redraw=true;
                     }
 
-                    if (ch=='k'&&!filtered.empty()) {
-                        char conf[256];
-                        snprintf(conf,sizeof(conf),
-                            "\x1b[%d;1H\x1b[2K\x1b[48;5;170m\x1b[30m  Kill %s (PID %lu)? [Y/N]  " RESET "\x1b[0m",
-                            rows,filtered[sel]->name.c_str(),(unsigned long)filtered[sel]->pid);
-                        out(conf);
-                        bool answered=false;
-                        while (!answered) {
-                            if (WaitForSingleObject(in_h,5000)!=WAIT_OBJECT_0) { answered=true; break; }
-                            DWORD kn=0; GetNumberOfConsoleInputEvents(in_h,&kn);
-                            while (kn-->0) {
-                                INPUT_RECORD kr; DWORD krd;
-                                ReadConsoleInputW(in_h,&kr,1,&krd);
-                                if (kr.EventType==WINDOW_BUFFER_SIZE_EVENT) { needs_clear=true; answered=true; break; }
-                                if (kr.EventType!=KEY_EVENT||!kr.Event.KeyEvent.bKeyDown) continue;
-                                wchar_t kch=towlower(kr.Event.KeyEvent.uChar.UnicodeChar);
-                                WORD    kvk=kr.Event.KeyEvent.wVirtualKeyCode;
-                                if (kch=='y') {
-                                    HANDLE kh=OpenProcess(PROCESS_TERMINATE,FALSE,filtered[sel]->pid);
-                                    if (kh){TerminateProcess(kh,1);CloseHandle(kh);}
-                                    answered=true;
-                                } else if (kch=='n'||kvk==VK_ESCAPE) {
-                                    answered=true;
-                                }
-                            }
-                        }
-                        needs_clear=true; redraw=true;
-                    }
+                    if (ch=='k'&&!filtered.empty()) { kill_pending=true; redraw=true; }
                 }
             }
         }
