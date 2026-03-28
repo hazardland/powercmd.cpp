@@ -355,8 +355,8 @@ static void draw(const file_buf& f, lang l) {
         std::string fname = (sl != std::string::npos) ? disp.substr(sl + 1) : disp;
         if (fname.empty()) fname = disp;
 
-        s += GREEN + fname + RESET;
-        if (f.modified) s += YELLOW "*" RESET;
+        s += BLUE + fname + RESET;
+        if (f.modified) s += BLUE "*" RESET;
 
         char info[48];
         snprintf(info, sizeof(info), "  %d:%d  ", f.cur_row + 1, f.cur_col + 1);
@@ -489,7 +489,7 @@ int edit_file(const std::string& path) {
                     char esc2[32];
                     snprintf(esc2, sizeof(esc2), "\x1b[%d;1H\x1b[K", term_height());
                     out(std::string(esc2) +
-                        YELLOW "Save?" RESET " "
+                        BLUE "Save?" RESET " "
                         "Y" GRAY "es" RESET " "
                         "N" GRAY "o" RESET);
                 };

@@ -30,30 +30,23 @@ static std::string make_bar(double pct) {
     return s+"]";
 }
 
-static const char* name_col(const std::string& n, double cpu) {
-    if (cpu>=20.0) return RED;
-    if (n=="chrome.exe"||n=="firefox.exe"||n=="msedge.exe"||
-        n=="opera.exe" ||n=="brave.exe")
-        return "\x1b[38;5;51m"; // cyan
+static const char* cpu_col(double pct) {
+    return BLUE;
+}
+
+static const char* mem_col(SIZE_T b) {
+    if (b>=(SIZE_T)100*1024*1024) return "\x1b[1;35m"; // bold magenta, same as ls images
+    return GRAY;
+}
+
+static const char* name_col(const std::string& n) {
     if (n=="svchost.exe"||n=="lsass.exe"||n=="csrss.exe"||n=="winlogon.exe"||
         n=="services.exe"||n=="smss.exe"||n=="wininit.exe"||n=="dwm.exe"||
         n=="System"||n=="Registry"||n=="Idle"||n=="spoolsv.exe"||
         n=="fontdrvhost.exe"||n=="audiodg.exe"||n=="taskhostw.exe"||
         n=="SearchIndexer.exe"||n=="RuntimeBroker.exe"||n=="sihost.exe")
         return GRAY;
-    return RESET;
-}
-
-static const char* cpu_col(double pct) {
-    if (pct>=50.0) return RED;
-    if (pct>=10.0) return YELLOW;
-    return GREEN;
-}
-
-static const char* mem_col(SIZE_T b) {
-    if (b>=(SIZE_T)512*1024*1024) return RED;
-    if (b>=(SIZE_T)100*1024*1024) return YELLOW;
-    return GREEN;
+    return BLUE;
 }
 
 static void top_cmd() {
@@ -199,27 +192,32 @@ static void top_cmd() {
         // Row 1 — Summary (dark bg)
         {
             char s[256];
-            snprintf(s,sizeof(s),"  CPU: %.1f%% RAM: %.1f/%.1fGB Procs: %d",
-                sys_cpu, ram_used, ram_total, (int)procs.size());
-            std::string line(s);
-            while ((int)line.size()<cols) line+=' ';
-            if ((int)line.size()>cols) line=line.substr(0,cols);
-            F+=GRAY+line+"\x1b[0m\r\n";
+            snprintf(s,sizeof(s),"%.1f%% ",sys_cpu);
+            char ru[32],rt[32];
+            snprintf(ru,sizeof(ru),"%.1f",ram_used);
+            snprintf(rt,sizeof(rt),"%.1f",ram_total);
+            char p[256];
+            snprintf(p,sizeof(p),"%d",(int)procs.size());
+            std::string line="  "+std::string(GRAY)+"CPU:"+BLUE+s+GRAY+"RAM:"+BLUE+ru+GRAY+"/"+BLUE+rt+GRAY+"GB "+GRAY+"PROCS:"+BLUE+p;
+            // pad
+            int plain_len=2+4+(int)strlen(s)+4+(int)strlen(ru)+1+(int)strlen(rt)+3+6+(int)strlen(p);
+            while (plain_len<cols) { line+=' '; plain_len++; }
+            F+=line+"\x1b[0m\r\n";
         }
 
         // Row 2 — Filter bar (always visible)
         {
             // "F" gray, "ilter: " white, then filter text
-            std::string line="  F"+std::string(GRAY)+"ilter: \x1b[39m";
-            int plain_len=10; // "  Filter: "
+            std::string line="  F"+std::string(GRAY)+"ilter: [";
+            int plain_len=12; // "  Filter: ["
             if (fmode) {
-                line+=fstr+"_";
+                line+=YELLOW+fstr+"_\x1b[39m";
                 plain_len+=(int)fstr.size()+1;
-            } else if (!fstr.empty()) {
-                line+=fstr;
+            } else {
+                line+=YELLOW+fstr+"\x1b[39m";
                 plain_len+=(int)fstr.size();
             }
-            line+=RESET;
+            line+=std::string(GRAY)+"]\x1b[39m"+RESET;
             F+=line+"\x1b[K\x1b[0m\r\n";
         }
 
@@ -251,7 +249,7 @@ static void top_cmd() {
                 std::string row(plain);
                 if ((int)row.size()>cols-1) row=row.substr(0,cols-1);
                 while ((int)row.size()<cols-1) row+=' ';
-                F+="\x1b[7m"+row+"\x1b[27m\r\n";
+                F+="\x1b[48;5;75m\x1b[30m"+row+RESET+"\r\n";
             } else {
                 // Colored row — build piece by piece, track plain length for padding
                 char pid_s[12]; snprintf(pid_s,sizeof(pid_s)," %6lu",(unsigned long)p.pid);
@@ -262,7 +260,7 @@ static void top_cmd() {
                 row+=GRAY+std::string(pid_s)+RESET;
                 row+=cpu_col(p.cpu)+std::string(cpu_s)+RESET;
                 row+=mem_col(p.mem)+std::string(mem_s)+RESET;
-                row+="  "+std::string(name_col(p.name,p.cpu))+sname+RESET;
+                row+="  "+std::string(name_col(p.name))+sname+RESET;
 
                 int plain_len=FIXED+(int)sname.size();
                 while (plain_len<cols-1) { row+=' '; plain_len++; }
