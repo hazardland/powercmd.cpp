@@ -25,6 +25,7 @@
 #include "src/clock.h"   // clock_cmd()
 #include "src/timer.h"   // timer_cmd()
 #include "src/json.h"    // json_fmt()
+#include "src/top.h"     // top_cmd()
 
 int main() {
     out_h = GetStdHandle(STD_OUTPUT_HANDLE);
@@ -55,7 +56,7 @@ int main() {
         "\x1b[38;5;226m    \xe2\x96\x88   \xe2\x96\x88   \xe2\x96\x88 \xe2\x96\x88 \xe2\x96\x88\r\n"                          // CMD:     █   █   █ █ █
         "\x1b[38;5;75m\xe2\x96\x88"                                                                                            // P: █
         "\x1b[38;5;226m    \xe2\x96\x80\xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88   \xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\xe2\x96\x80\r\n"  // CMD:     ▀██ █   █ ██▀
-        RESET GRAY "Power cmd v" VERSION RESET "\r\n"
+        RESET GRAY "PowerCmd v" VERSION RESET "\r\n"
     );
 
     bool elev = elevated();
@@ -165,6 +166,7 @@ int main() {
                 GREEN "snow" RESET "     Falling snow screensaver  any key to exit\r\n"
                 GREEN "note" RESET "     Open ~/notes.md in the editor\r\n"
                 GREEN "ip" RESET "       Show local IPv4 addresses\r\n"
+                GREEN "top" RESET "      Interactive process viewer  [↑↓] navigate  [m/c] sort  [k] kill  [q] quit\r\n"
                 GREEN "clock" RESET "    Live fullscreen clock  any key to exit\r\n"
                 GREEN "timer" RESET "    Stopwatch counting up  any key stops and prints result\r\n"
                 GREEN "calc" RESET "     Evaluate arithmetic  calc (2+3)*4^2\r\n"
@@ -202,6 +204,12 @@ int main() {
 
         if (lower == "ip") {
             last_code = ip_cmd();
+            continue;
+        }
+
+        if (lower == "top") {
+            top_cmd();
+            last_code = 0;
             continue;
         }
 

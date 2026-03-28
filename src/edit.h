@@ -490,8 +490,8 @@ int edit_file(const std::string& path) {
                     snprintf(esc2, sizeof(esc2), "\x1b[%d;1H\x1b[K", term_height());
                     out(std::string(esc2) +
                         YELLOW "Save?" RESET " "
-                        GRAY "Y" RESET "es "
-                        GRAY "N" RESET "o");
+                        "Y" GRAY "es" RESET " "
+                        "N" GRAY "o" RESET);
                 };
                 show_prompt();
                 while (true) {
