@@ -5,7 +5,7 @@ set /a MINOR=%MINOR%+1
 (echo %MINOR%)>version.txt
 
 echo Building pcmd.exe v0.0.%MINOR%...
-g++ pcmd.cpp -o pcmd.exe -DVERSION_MINOR=%MINOR% -ladvapi32 -lshell32
+g++ pcmd.cpp -o pcmd.exe -DVERSION_MINOR=%MINOR% -ladvapi32 -lshell32 -static-libgcc -static-libstdc++
 if %errorlevel% == 0 (
     echo Done: pcmd.exe v0.0.%MINOR%
 ) else (
