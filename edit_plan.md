@@ -2,8 +2,8 @@
 
 ## Context
 
-This is a built-in `edit` command for **Power CMD** (`pcmd.exe`), a single-file C++ terminal
-shell for Windows. The codebase uses a **unity build**: `pcmd.cpp` includes all modules in
+This is a built-in `edit` command for **Zcmd** (`zcmd.exe`), a single-file C++ terminal
+shell for Windows. The codebase uses a **unity build**: `zcmd.cpp` includes all modules in
 order, so every module has access to everything defined before it — no separate compilation,
 no linker issues, just `#include` order matters.
 
@@ -29,7 +29,7 @@ src/cat.h        — cat() command
 src/edit.h       — TO BE WRITTEN
 ```
 
-**`pcmd.cpp` include order** — add `edit.h` last:
+**`zcmd.cpp` include order** — add `edit.h` last:
 ```cpp
 #include "src/common.h"
 #include "src/terminal.h"
@@ -300,7 +300,7 @@ clipboard convention regardless of file's line ending style).
 
 ---
 
-## Wire-up in pcmd.cpp
+## Wire-up in zcmd.cpp
 
 ### Add include
 ```cpp
@@ -338,7 +338,7 @@ Build and test after each step.
 7. **Selection** — anchor tracking, `in_selection()`, reverse-video rendering
 8. **Clipboard** — Ctrl+C copy, Ctrl+X cut, Ctrl+V paste
 9. **Save / quit** — Ctrl+S, Ctrl+Q/Esc with dirty check, Alt+Z wrap toggle
-10. **Wire up** — pcmd.cpp dispatch + help text
+10. **Wire up** — zcmd.cpp dispatch + help text
 
 ---
 

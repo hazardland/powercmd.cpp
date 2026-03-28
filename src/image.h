@@ -1,7 +1,7 @@
 // MODULE: image
 // Purpose : inline image rendering — stb_image decode, 2×2 block quantization, 24-bit color output
 // Exports : is_image_ext() cat_image() | imgpush_cell() (used by video.h)
-// Depends : common.h, stb_image.h (must be included before this via pcmd.cpp)
+// Depends : common.h, stb_image.h (must be included before this via zcmd.cpp)
 
 static bool is_image_ext(const std::string& path) {
     size_t dot = path.rfind('.');

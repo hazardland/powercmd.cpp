@@ -1,6 +1,6 @@
-# Power CMD — A single executable shell for Windows
+# Zcmd — A single executable shell for Windows
 
-![Power CMD demo](./images/pcmd_cat_video.gif)
+![Zcmd demo](./images/pcmd_cat_video.gif)
 
 ## Why
 
@@ -16,7 +16,7 @@ What I was actually missing:
 - **History that persists** — close the window, open it again, your history is still there
 - **History hints** — gray ghost text as you type, filtered `↑`/`↓` that only shows commands matching what you started typing
 - **Folder tab completion** — `cd ../pr` + Tab and it just works, including parent paths; `ls` gets the same hints and tab cycling
-- **`cd -`** — jump back to where you were, like every Linux shell takes for granted; `cd --` restores the directory from the previous session; `cd ~~` jumps to wherever pcmd.exe lives
+- **`cd -`** — jump back to where you were, like every Linux shell takes for granted; `cd --` restores the directory from the previous session; `cd ~~` jumps to wherever zcmd.exe lives
 - **Elapsed time** — always want to know how long that build or install actually took
 - **`pwd`, `which`** — small tools that should just exist
 - **Multiline paste** — pasting a curl command from Chrome without the terminal losing its mind
@@ -27,7 +27,7 @@ Built it from scratch in C++ with the help of Claude. Single file, no dependenci
 
 ```
 Windows Terminal
-└── pcmd.exe  (permanent process, entire session)
+└── zcmd.exe  (permanent process, entire session)
         │
         ├── built-ins handled directly in C++
         │   cd, ls, pwd, which, version, help, auto-cd, hints...
@@ -38,7 +38,7 @@ Windows Terminal
                                         batch files, dir, echo, set, &&, ||...
 ```
 
-`pcmd.exe` owns the input loop and UX. `cmd.exe` is a temporary worker used for execution — you get full Windows command compatibility without `pcmd.exe` needing to reimplement any of it.
+`zcmd.exe` owns the input loop and UX. `cmd.exe` is a temporary worker used for execution — you get full Windows command compatibility without `zcmd.exe` needing to reimplement any of it.
 
 ## Features
 
@@ -123,10 +123,10 @@ Colors: dirs blue · executables green · archives red · images magenta · audi
 
 ---
 
-- `cd <dir>` — with `/d` flag, `~` for home, `-` for previous directory, `--` for last session's directory, `~~` for pcmd.exe's directory
+- `cd <dir>` — with `/d` flag, `~` for home, `-` for previous directory, `--` for last session's directory, `~~` for zcmd.exe's directory
 - `pwd` — print current directory with forward slashes
-- `which <cmd>` — locate a command in PATH, or identify pcmd built-ins
-- `version` — print current pcmd version
+- `which <cmd>` — locate a command in PATH, or identify zcmd built-ins
+- `version` — print current zcmd version
 - `help` — list all built-in commands
 - Auto-cd — type a directory path and press Enter, no `cd` needed
 
@@ -139,11 +139,11 @@ Colors: dirs blue · executables green · archives red · images magenta · audi
 
 ### Windows Terminal
 
-Point your profile's command line directly at `pcmd.exe`:
+Point your profile's command line directly at `zcmd.exe`:
 
 ```json
 {
-    "commandline": "d:/src/powerline/pcmd.exe",
+    "commandline": "d:/src/powerline/zcmd.exe",
 }
 ```
 
@@ -152,24 +152,24 @@ Point your profile's command line directly at `pcmd.exe`:
 ```json
 {
     "terminal.integrated.profiles.windows": {
-        "pcmd": {
+        "zcmd": {
             "path": [
-                "d:/src/powerline/pcmd.exe"
+                "d:/src/powerline/zcmd.exe"
             ]
         }
     },
-    "terminal.integrated.defaultProfile.windows": "pcmd"
+    "terminal.integrated.defaultProfile.windows": "zcmd"
 }
 ```
 
 ## Release
 
-The release is a single file: **`pcmd.exe`**. No runtime, no DLLs, no config files required. Built against the Windows SDK only.
+The release is a single file: **`zcmd.exe`**. No runtime, no DLLs, no config files required. Built against the Windows SDK only.
 
-Download the latest `pcmd-v0.0.X.zip` from the [Releases](../../releases) page, extract, and point your terminal profile at `pcmd.exe`.
+Download the latest `zcmd-v0.0.X.zip` from the [Releases](../../releases) page, extract, and point your terminal profile at `zcmd.exe`.
 
 To build from source:
 ```
-g++ pcmd.cpp -o pcmd.exe -DVERSION_MINOR=X -ladvapi32 -lshell32
+g++ zcmd.cpp -o zcmd.exe -DVERSION_MINOR=X -ladvapi32 -lshell32
 ```
 or just run `build.bat` which auto-increments the version.

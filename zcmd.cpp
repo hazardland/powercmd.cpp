@@ -166,7 +166,7 @@ int main() {
 
         if (lower == "help") {
             out(
-                GREEN "version" RESET " Print pcmd version\r\n"
+                GREEN "version" RESET " Print zcmd version\r\n"
                 GREEN "pwd" RESET "     Print current directory\r\n"
                 GREEN "ls" RESET "      Colored listing  -a all  -s by size  -t by time  -l long  -r reverse  | grep <word>\r\n"
                 GREEN "cd" RESET "      Change directory  ~ home  - prev dir\r\n"
@@ -189,7 +189,7 @@ int main() {
                 GREEN "alias" RESET "   alias ll=ls -l  define · alias ll  show · alias  list all\r\n"
                 GREEN "unalias" RESET " Remove an alias\r\n"
                 GREEN "help" RESET "    Show this help\r\n"
-                GREEN "exit" RESET "    Exit pcmd\r\n"
+                GREEN "exit" RESET "    Exit zcmd\r\n"
                 GRAY "All other commands are passed to cmd.exe" RESET "\r\n"
             );
             last_code = 0;
@@ -197,7 +197,7 @@ int main() {
         }
 
         if (lower == "version") {
-            out("pcmd v" VERSION "\r\n");
+            out("zcmd v" VERSION "\r\n");
             last_code = 0;
             continue;
         }

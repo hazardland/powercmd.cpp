@@ -1,6 +1,6 @@
 // MODULE: persist
 // Purpose : on-disk persistence — working-dir memory, command history, aliases (load/save/compact)
-// Exports : prev_dir last_session_dir | pcmd_dir() history_path() prev_dir_path() aliases_path()
+// Exports : prev_dir last_session_dir | zcmd_dir() history_path() prev_dir_path() aliases_path()
 //           load_prev_dir() save_prev_dir() | aliases | load_aliases() write_alias() expand_alias()
 //           load_history() append_history() compact_history()
 // Depends : common.h, input.h (struct input used by load_history)
@@ -8,17 +8,17 @@
 static std::string prev_dir;
 static std::string last_session_dir;
 
-// Returns %USERPROFILE%\.pcmd\ and creates it if it doesn't exist.
-std::string pcmd_dir() {
+// Returns %USERPROFILE%\.zcmd\ and creates it if it doesn't exist.
+std::string zcmd_dir() {
     wchar_t buf[MAX_PATH];
     GetEnvironmentVariableW(L"USERPROFILE", buf, MAX_PATH);
-    std::string dir = to_utf8(buf) + "\\.pcmd";
+    std::string dir = to_utf8(buf) + "\\.zcmd";
     CreateDirectoryW(to_wide(dir).c_str(), NULL);
     return dir + "\\";
 }
 
-std::string history_path()  { return pcmd_dir() + "history";  }
-std::string prev_dir_path() { return pcmd_dir() + "prev_dir"; }
+std::string history_path()  { return zcmd_dir() + "history";  }
+std::string prev_dir_path() { return zcmd_dir() + "prev_dir"; }
 
 void load_prev_dir() {
     std::ifstream f(prev_dir_path());
@@ -37,7 +37,7 @@ void save_prev_dir() {
 
 static std::unordered_map<std::string, std::string> aliases;
 
-std::string aliases_path() { return pcmd_dir() + "aliases"; }
+std::string aliases_path() { return zcmd_dir() + "aliases"; }
 
 void load_aliases() {
     std::ifstream f(aliases_path());

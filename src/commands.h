@@ -281,7 +281,7 @@ int which(const std::string& arg) {
     std::transform(argl.begin(), argl.end(), argl.begin(), ::tolower);
     static const std::vector<std::string> builtins = {"ls","cd","pwd","cat","exit","which","help","version","alias","unalias"};
     for (auto& b : builtins) {
-        if (argl == b) { out(arg + ": pcmd built-in\r\n"); return 0; }
+        if (argl == b) { out(arg + ": zcmd built-in\r\n"); return 0; }
     }
     std::vector<std::string> exts;
     char pathext[4096] = {};

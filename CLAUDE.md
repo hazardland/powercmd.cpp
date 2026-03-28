@@ -1,4 +1,4 @@
-# Powerline / Power CMD — Dev Rules
+# Powerline / Zcmd — Dev Rules
 
 ## Git
 - Never commit directly to `master` — always create a new branch when starting work
@@ -7,10 +7,10 @@
 
 ## Project Structure
 - **Batch system** (`init.bat`, `_set.bat`, `alias.bat`, etc.) — keep untouched, it is the stable base
-- **pcmd.cpp** — C++ alternative called "Power CMD", single file executable, lives in the same folder
-- Both systems are independent; pcmd.cpp does not replace the batch system
+- **zcmd.cpp** — C++ alternative called "Zcmd", single file executable, lives in the same folder
+- Both systems are independent; zcmd.cpp does not replace the batch system
 
-## C++ Conventions (pcmd.cpp)
+## C++ Conventions (zcmd.cpp)
 - `snake_case` for all variable names
 - Single word for function and variable names where there is no ambiguity
 - Single `.cpp` file, no external dependencies, Windows SDK only
@@ -21,11 +21,11 @@
 - `version.txt` stores the current patch number
 - `build.bat` increments it automatically on each successful build and rolls back on failure
 - User resets or promotes version manually when needed (e.g. `0.1.0`, `1.0.0`)
-- Release titles use `pcmd v0.0.X` format (not "Power CMD v0.0.X")
-- Always attach `pcmd.exe` as a binary asset when creating a GitHub release
+- Release titles use `zcmd v0.0.X` format
+- Always attach `zcmd.exe` as a binary asset when creating a GitHub release
 
 ## Prompt / UI
-- Tool name: **Power CMD**
+- Tool name: **Zcmd**
 - Prompt format: `[time]folder[branch*]> `
 - Colors: gray=240, blue=75 (normal), red=203 (elevated), yellow=229 (branch)
 - Path separators displayed as `/` (forward slash) everywhere (prompt, pwd, tab completion)
@@ -42,7 +42,7 @@
 ## General
 - No breaking changes without checking with user first
 - Keep changes simple and focused — no over-engineering
-- `build.bat` kills any running `pcmd.exe` before building, so no manual process kill needed
+- `build.bat` kills any running `zcmd.exe` before building, so no manual process kill needed
 
 ## Postponed ideas
 - **Tab-complete executables from PATH** — postponed: mixing PATH executables with local folder contents in Tab completion is ambiguous and confusing. Tab is for folder/file navigation only.
