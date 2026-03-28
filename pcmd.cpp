@@ -45,17 +45,17 @@ int main() {
     SetConsoleOutputCP(65001);
 
     out(
-        "\x1b[38;5;75m\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x84"                                                       // P: ███▄
+        "\x1b[38;5;75m\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88"                                                       // Z: ████
         "\x1b[38;5;226m \xe2\x96\x84\xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x84 \xe2\x96\x84\xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\xe2\x96\x84\r\n"  // CMD:  ▄██ █▄ ▄█ ██▄
-        "\x1b[38;5;75m\xe2\x96\x88  \xe2\x96\x88"                                                                              // P: █  █
+        "\x1b[38;5;75m  \xe2\x96\x84\xe2\x96\x88"                                                                              // Z:   ▄█
         "\x1b[38;5;226m \xe2\x96\x88   \xe2\x96\x88 \xe2\x96\x88 \xe2\x96\x88 \xe2\x96\x88 \xe2\x96\x88\r\n"                  // CMD:  █   █ █ █ █ █
-        "\x1b[38;5;75m\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x80"                                                       // P: ███▀
+        "\x1b[38;5;75m \xe2\x96\x84\xe2\x96\x88 "                                                                              // Z:  ▄█
         "\x1b[38;5;226m \xe2\x96\x88   \xe2\x96\x88   \xe2\x96\x88 \xe2\x96\x88 \xe2\x96\x88\r\n"                             // CMD:  █   █   █ █ █
-        "\x1b[38;5;75m\xe2\x96\x88"                                                                                            // P: █
-        "\x1b[38;5;226m    \xe2\x96\x88   \xe2\x96\x88   \xe2\x96\x88 \xe2\x96\x88 \xe2\x96\x88\r\n"                          // CMD:     █   █   █ █ █
-        "\x1b[38;5;75m\xe2\x96\x88"                                                                                            // P: █
-        "\x1b[38;5;226m    \xe2\x96\x80\xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88   \xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\xe2\x96\x80\r\n"  // CMD:     ▀██ █   █ ██▀
-        RESET GRAY "PowerCmd v" VERSION RESET "\r\n"
+        "\x1b[38;5;75m\xe2\x96\x84\xe2\x96\x88  "                                                                              // Z: ▄█
+        "\x1b[38;5;226m \xe2\x96\x88   \xe2\x96\x88   \xe2\x96\x88 \xe2\x96\x88 \xe2\x96\x88\r\n"                             // CMD:  █   █   █ █ █
+        "\x1b[38;5;75m\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88"                                                       // Z: ████
+        "\x1b[38;5;226m \xe2\x96\x80\xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88   \xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\xe2\x96\x80\r\n"   // CMD:  ▀██ █   █ ██▀
+        RESET GRAY "Zcmd v" VERSION RESET "\r\n"
     );
     // Print Windows build info
     {
