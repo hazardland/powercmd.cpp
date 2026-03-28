@@ -42,14 +42,27 @@ static void matrix() {
         int delay;  // ticks before (re)start
     };
 
-    std::vector<drop> drops(cols);
-    for (int c = 0; c < cols; c++)
-        drops[c] = { -1, 6 + rand() % 15, 1 + rand() % 3, 0, rand() % 10 };
+    auto init_drops = [&](std::vector<drop>& d, int c, int r) {
+        d.assign(c, { -1, 0, 0, 0, 0 });
+        for (int i = 0; i < c; i++)
+            d[i] = { -1, 6 + rand() % 15, 1 + rand() % 3, 0, rand() % r };
+    };
+
+    std::vector<drop> drops;
+    init_drops(drops, cols, rows);
 
     // hide cursor, clear screen
     out("\x1b[?25l\x1b[2J");
 
     while (true) {
+        // handle resize
+        int new_cols = term_width(), new_rows = term_height();
+        if (new_cols != cols || new_rows != rows) {
+            cols = new_cols; rows = new_rows;
+            init_drops(drops, cols, rows);
+            out("\x1b[2J");
+        }
+
         // non-blocking keypress check — any key exits
         DWORD n = 0;
         GetNumberOfConsoleInputEvents(in_h, &n);
