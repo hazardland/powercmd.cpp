@@ -408,10 +408,59 @@ static int mp3_show_status() {
     return snap.state == mp3_stopped && snap.last_error.empty() ? 1 : 0;
 }
 
+// mp3_make_bars_locked — waveform bar visualizer
+//
+// Called inside g_mp3.lock every UI refresh (~60ms). Returns a string like
+// [▁▃▆█▇▄▂▁▃▅▇█] that is printed in-place on the status line.
+//
+// How it works — scrolling history:
+//   Every step_ms of playback a new bar is computed and appended on the right;
+//   the oldest bar drops off the left. This means the display always scrolls
+//   forward in time, so it never "freezes" even during a sustained note.
+//
+// How each bar's height is measured:
+//   Instead of averaging over the full step window (which made every bar look
+//   the same for bass), we sample a narrow ~2ms window at the step's midpoint.
+//   At 80 Hz bass the waveform cycle is ~12ms, so adjacent 15ms steps land on
+//   different phases of the cycle — one bar catches the crest (loud), the next
+//   catches near the zero crossing (quiet), giving real height variation.
+//
+// Amplitude → height mapping (smoothstep S-curve):
+//   norm  = peak_in_window / track_peak          (0..1 relative to loudest sample)
+//   level = norm² × (3 − 2×norm) × 7            (smoothstep, 0..7)
+//   Smoothstep has an S-shape: it pushes low values toward ▁ and high values
+//   toward █, making quiet sections visually dark and loud sections visually full.
+//
+// Reset logic:
+//   play_started_tick changes when a new track starts or the user seeks, so the
+//   history is cleared automatically on those events.
+//
+// --- Tuning knobs ---
+//
+//   Time resolution (zoom in / zoom out):
+//     Change `step_ms` below AND the WaitForSingleObject timeout in mp3_ui_key_pressed()
+//     to the same value — they must match for smooth 1-bar-per-frame scrolling.
+//     Smaller  → zoomed in,  more detail, shorter time window (15ms → ~180ms total)
+//     Larger   → zoomed out, smoother,    longer  time window (60ms → ~720ms total)
+//     Good range: 10ms (very detailed, ~120fps) … 60ms (wide view, ~16fps)
+//
+//   Contrast (exaggeration of highs and lows):
+//     The mapping is:  level = norm² × (3 − 2×norm) × 7   (smoothstep S-curve)
+//     To increase contrast, steepen the curve — replace with a sharper S:
+//       level = norm³ × (6×norm² − 15×norm + 10) × 7      (smootherstep, steeper)
+//     To decrease contrast (flatter, more uniform bars), use a power curve:
+//       level = sqrt(norm) × 7                             (gentler slope)
+//     Or scale the output to exaggerate: level = norm² × (3 − 2×norm) × 9 − 1
+//     clamped to [0, 7] — this clips the very top and bottom for more drama.
+//
+//   Reference level (what counts as "loud"):
+//     `ref_peak = track_peak` — the absolute loudest sample in the file.
+//     Lower it (e.g. track_peak * 0.6) to make average passages look louder.
+//     Use track_rms * N (N ≈ 3–5) to normalize relative to typical loudness.
 static std::string mp3_make_bars_locked(int elapsed_ms, int bar_count) {
     static const char* glyphs[] = {"▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"};
 
-    // Scrolling history: each slot = peak level of a 60ms window
+    // Scrolling history: each slot = peak level of a step_ms window
     static double history[12] = {};
     static int    history_size = 0;
     static int    last_step    = -1;
@@ -434,10 +483,8 @@ static std::string mp3_make_bars_locked(int elapsed_ms, int bar_count) {
     int frame_count = sample_count / g_mp3.channels;
     int ref_peak = g_mp3.track_peak > 0 ? g_mp3.track_peak : 32767;
 
-    // Step every 60ms — matches UI refresh.
-    // Sample a narrow ~2ms window at each step midpoint so bass waveform phase
-    // variation maps to height differences (peak ≠ same across adjacent bars).
-    const int step_ms  = 60;
+    // Each step: sample a narrow ~2ms window at the step midpoint.
+    const int step_ms  = 8;
     const int half_win = g_mp3.hz / 500;   // ~2ms total window, 1ms each side
     int cur_step = elapsed_ms / step_ms;
     while (last_step < cur_step) {
@@ -459,7 +506,7 @@ static std::string mp3_make_bars_locked(int elapsed_ms, int bar_count) {
         }
         double norm = (double)peak / ref_peak;
         if (norm > 1.0) norm = 1.0;
-        double level = sqrt(norm) * 7.0;
+        double level = norm * norm * (3.0 - 2.0 * norm) * 7.0;
 
         // Shift left, append new value
         if (history_size < bar_count) {
@@ -628,7 +675,7 @@ static std::string mp3_ui_line() {
 }
 
 static bool mp3_ui_key_pressed() {
-    DWORD wait = WaitForSingleObject(in_h, 60);
+    DWORD wait = WaitForSingleObject(in_h, 8);
     if (wait != WAIT_OBJECT_0) return false;
 
     DWORD count = 0;
