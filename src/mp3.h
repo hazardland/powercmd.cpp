@@ -721,6 +721,8 @@ static int mp3_ui() {
     }
 
     while (true) {
+        snap = mp3_snapshot();
+        if (snap.state == mp3_stopped && snap.path.empty()) break;
         out("\r\x1b[2K" + mp3_ui_line());
         if (mp3_ui_key_pressed()) break;
     }
