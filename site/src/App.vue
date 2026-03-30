@@ -1,10 +1,25 @@
 <script setup>
+import { onBeforeUnmount, onMounted, ref } from 'vue'
 import { features } from './data/features'
 
 const heroVideo = '/videos/header.mp4'
 const heroRatio = '8 / 11'
 const heroTopTrim = '5.8%'
 const heroChromeHeight = '42px'
+const headerCondensed = ref(false)
+
+const updateHeaderState = () => {
+  headerCondensed.value = window.scrollY > 28
+}
+
+onMounted(() => {
+  updateHeaderState()
+  window.addEventListener('scroll', updateHeaderState, { passive: true })
+})
+
+onBeforeUnmount(() => {
+  window.removeEventListener('scroll', updateHeaderState)
+})
 
 const tools = [
   { cmd: 'ls',    desc: 'list files with color' },
@@ -31,7 +46,7 @@ const tools = [
       <div class="grid-fade"></div>
     </div>
 
-    <header class="site-header">
+    <header class="site-header" :class="{ 'is-condensed': headerCondensed }">
       <div class="site-header-shell">
         <nav class="topbar" aria-label="Primary">
           <a class="brand-lockup" href="#top" aria-label="Zcmd homepage">

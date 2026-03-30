@@ -1,6 +1,6 @@
 // MODULE: edit
 // Purpose : full-screen terminal file editor
-// Exports : edit_file()
+// Exports : edit_file(), view_file()
 // Depends : common.h, terminal.h, highlight.h
 
 static const int GUTTER = 4; // "%3d " — 3-digit line number + space
@@ -38,6 +38,73 @@ struct file_buf {
     int  last_del_dir  = 0;      // -1=backspace, +1=fwd-delete, 0=none
     int  saved_gen     = 0;      // undo_stack.size() at last save
 };
+
+static bool looks_binary_bytes(const std::string& data) {
+    if (data.empty()) return false;
+
+    int suspicious = 0;
+    for (unsigned char c : data) {
+        if (c == 0) return true;
+        if (c < 32 && c != '\n' && c != '\r' && c != '\t' && c != '\f')
+            suspicious++;
+    }
+    return suspicious > (int)data.size() / 10;
+}
+
+static bool probe_binary_file(const std::string& path) {
+    std::ifstream ifs(path, std::ios::binary);
+    if (!ifs) return false;
+
+    char buf[4096];
+    ifs.read(buf, sizeof(buf));
+    std::streamsize got = ifs.gcount();
+    if (got <= 0) return false;
+    return looks_binary_bytes(std::string(buf, (size_t)got));
+}
+
+static std::string clip_plain(const std::string& s, int width) {
+    if (width <= 0) return "";
+    if ((int)s.size() <= width) return s;
+    if (width <= 3) return std::string(width, '.');
+    return s.substr(0, width - 3) + "...";
+}
+
+static int show_binary_notice(const std::string& path, bool readonly) {
+    auto redraw = [&]() {
+        int H = term_height();
+        int W = term_width();
+        std::string disp = path;
+        std::replace(disp.begin(), disp.end(), '\\', '/');
+
+        out("\x1b[2J\x1b[H");
+        int row = std::max(1, H / 2 - 1);
+        auto line = [&](int y, const std::string& text, const std::string& color = "") {
+            char esc[32];
+            snprintf(esc, sizeof(esc), "\x1b[%d;1H\x1b[K", y);
+            std::string body = clip_plain(text, std::max(1, W));
+            out(std::string(esc) + color + body + RESET);
+        };
+
+        line(row, readonly ? "Binary file view is not supported yet." : "Binary file edit is not supported.", YELLOW);
+        line(row + 1, disp, GRAY);
+        line(row + 3, "Press any key to return.", BLUE);
+    };
+
+    redraw();
+    while (true) {
+        INPUT_RECORD ir;
+        DWORD count = 0;
+        if (!ReadConsoleInputW(in_h, &ir, 1, &count)) break;
+        if (ir.EventType == WINDOW_BUFFER_SIZE_EVENT) {
+            redraw();
+            continue;
+        }
+        if (ir.EventType == KEY_EVENT && ir.Event.KeyEvent.bKeyDown)
+            break;
+    }
+    out("\x1b[2J\x1b[H\x1b[?25h");
+    return 1;
+}
 
 // ---- UTF-8 helpers ----
 
@@ -242,6 +309,8 @@ static void do_redo(file_buf& f) {
 // ---- Cursor clamping & scrolling ----
 
 static void clamp_col(file_buf& f) {
+    if (f.cur_row < 0) f.cur_row = 0;
+    if (f.cur_row >= (int)f.lines.size()) f.cur_row = (int)f.lines.size() - 1;
     int len = (int)f.lines[f.cur_row].size();
     if (f.cur_col < 0)   f.cur_col = 0;
     if (f.cur_col > len) f.cur_col = len;
@@ -416,7 +485,7 @@ static std::string render_content(const std::string& raw, int col_start, int vis
     return overlay_sel(clipped, vis_ss, vis_se);
 }
 
-static void draw(const file_buf& f, lang l) {
+static void draw(const file_buf& f, lang l, bool readonly = false) {
     int H        = term_height();
     int W        = term_width();
     int vis_rows = H - 1;
@@ -484,6 +553,7 @@ static void draw(const file_buf& f, lang l) {
         s += GRAY + std::string(info);
         s += f.crlf ? "CRLF" : "LF";
         if (f.wrap) s += "  WRAP";
+        if (readonly) s += "  VIEW";
         s += RESET;
 
     }
@@ -547,9 +617,11 @@ static void do_paste(file_buf& f) {
 
 // ---- Main entry point ----
 
-int edit_file(const std::string& path) {
+static int edit_file_mode(const std::string& path, bool readonly) {
     file_buf f;
     f.path = normalize_path(path);
+    if (probe_binary_file(f.path))
+        return show_binary_notice(f.path, readonly);
     load(f);
     lang l = detect_lang(f.path);
 
@@ -564,7 +636,7 @@ int edit_file(const std::string& path) {
     };
     refresh_dims();
     clamp_scroll(f, vis_rows, vis_w);
-    draw(f, l);
+    draw(f, l, readonly);
 
     bool quit = false;
     while (!quit) {
@@ -574,7 +646,7 @@ int edit_file(const std::string& path) {
         if (ir.EventType == WINDOW_BUFFER_SIZE_EVENT) {
             refresh_dims();
             clamp_scroll(f, vis_rows, vis_w);
-            draw(f, l);
+            draw(f, l, readonly);
             continue;
         }
         if (ir.EventType != KEY_EVENT || !ir.Event.KeyEvent.bKeyDown) continue;
@@ -591,9 +663,13 @@ int edit_file(const std::string& path) {
         // ---- Save / quit / wrap toggle ----
 
         if (vk == VK_F2 || (ctrl && vk == 'S')) {
+            if (readonly) {
+                draw(f, l, readonly);
+                continue;
+            }
             save(f);
             f.saved_gen = (int)f.undo_stack.size();
-            draw(f, l);
+            draw(f, l, readonly);
             continue;
         }
 
@@ -601,7 +677,7 @@ int edit_file(const std::string& path) {
             f.wrap = !f.wrap;
             f.left_col = 0;
             clamp_scroll(f, vis_rows, vis_w);
-            draw(f, l);
+            draw(f, l, readonly);
             continue;
         }
 
@@ -622,14 +698,14 @@ int edit_file(const std::string& path) {
                     if (!ReadConsoleInputW(in_h, &ir2, 1, &c2)) { quit = true; break; }
                     if (ir2.EventType == WINDOW_BUFFER_SIZE_EVENT) {
                         refresh_dims(); clamp_scroll(f, vis_rows, vis_w);
-                        draw(f, l); show_prompt(); continue;
+                        draw(f, l, readonly); show_prompt(); continue;
                     }
                     if (ir2.EventType != KEY_EVENT || !ir2.Event.KeyEvent.bKeyDown) continue;
                     wchar_t ch2 = ir2.Event.KeyEvent.uChar.UnicodeChar;
                     WORD vk2 = ir2.Event.KeyEvent.wVirtualKeyCode;
                     if (ch2 == 'y' || ch2 == 'Y') { save(f); quit = true; break; }
                     if (ch2 == 'n' || ch2 == 'N') { quit = true; break; }
-                    if (ch2 == 'c' || ch2 == 'C' || vk2 == VK_ESCAPE) { draw(f, l); break; }
+                    if (ch2 == 'c' || ch2 == 'C' || vk2 == VK_ESCAPE) { draw(f, l, readonly); break; }
                 }
             } else {
                 quit = true;
@@ -641,12 +717,12 @@ int edit_file(const std::string& path) {
 
         if (ctrl && !shift && vk == 'Z') {
             do_undo(f);
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         if ((ctrl && !shift && vk == 'Y') || (ctrl && shift && vk == 'Z')) {
             do_redo(f);
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         // ---- Clipboard ----
@@ -655,16 +731,20 @@ int edit_file(const std::string& path) {
             f.sel_row = 0; f.sel_col = 0;
             f.cur_row = (int)f.lines.size() - 1;
             f.cur_col = (int)f.lines[f.cur_row].size();
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         if (ctrl && vk == 'C') {
             if (f.sel_row >= 0) clipboard_set(to_wide(get_selection(f)));
-            draw(f, l);
+            draw(f, l, readonly);
             continue;
         }
 
         if (ctrl && vk == 'X') {
+            if (readonly) {
+                draw(f, l, readonly);
+                continue;
+            }
             if (f.sel_row >= 0) {
                 int ar = f.sel_row, ac = f.sel_col, br = f.cur_row, bc = f.cur_col;
                 if (ar > br || (ar==br && ac>bc)) { std::swap(ar,br); std::swap(ac,bc); }
@@ -675,11 +755,15 @@ int edit_file(const std::string& path) {
                 delete_selection(f);
                 clamp_scroll(f, vis_rows, vis_w);
             }
-            draw(f, l);
+            draw(f, l, readonly);
             continue;
         }
 
         if ((ctrl && vk == 'D') || (ctrl && shift && vk == 'K')) {
+            if (readonly) {
+                draw(f, l, readonly);
+                continue;
+            }
             // delete current line (Ctrl+D primary, Ctrl+Shift+K VSCode alias)
             int cr = f.cur_row, cc = f.cur_col;
             f.last_was_char = false; f.last_del_dir = 0;
@@ -701,10 +785,14 @@ int edit_file(const std::string& path) {
                 f.lines[0].clear();
             }
             f.cur_col = 0; f.sel_row = -1; f.modified = true;
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         if (ctrl && vk == 'V') {
+            if (readonly) {
+                draw(f, l, readonly);
+                continue;
+            }
             std::wstring wclip = clipboard_get();
             if (!wclip.empty()) {
                 // normalize clipboard to \n — same logic as do_paste — to use as new_text
@@ -731,7 +819,7 @@ int edit_file(const std::string& path) {
                           cr_before, cc_before, f.cur_row, f.cur_col);
             }
             clamp_scroll(f, vis_rows, vis_w);
-            draw(f, l);
+            draw(f, l, readonly);
             continue;
         }
 
@@ -740,13 +828,13 @@ int edit_file(const std::string& path) {
         if (vk == VK_UP) {
             if (shift) sel_begin(f); else sel_clear(f);
             if (f.cur_row > 0) { f.cur_row--; clamp_col(f); }
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         if (vk == VK_DOWN) {
             if (shift) sel_begin(f); else sel_clear(f);
             if (f.cur_row < (int)f.lines.size() - 1) { f.cur_row++; clamp_col(f); }
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         if (vk == VK_LEFT) {
@@ -759,7 +847,7 @@ int edit_file(const std::string& path) {
                 f.cur_row--;
                 f.cur_col = (int)f.lines[f.cur_row].size();
             }
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         if (vk == VK_RIGHT) {
@@ -772,13 +860,13 @@ int edit_file(const std::string& path) {
                 f.cur_row++;
                 f.cur_col = 0;
             }
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         if (vk == VK_HOME) {
             if (shift) sel_begin(f); else sel_clear(f);
             f.cur_col = ctrl ? (f.cur_row = 0, 0) : 0;
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         if (vk == VK_END) {
@@ -789,14 +877,14 @@ int edit_file(const std::string& path) {
             } else {
                 f.cur_col = (int)f.lines[f.cur_row].size();
             }
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         if (vk == VK_PRIOR) {  // Page Up
             sel_clear(f);
             if (ctrl) { f.cur_row = 0; f.cur_col = 0; }
             else { f.cur_row -= vis_rows - 1; clamp_col(f); }
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         if (vk == VK_NEXT) {  // Page Down
@@ -808,12 +896,16 @@ int edit_file(const std::string& path) {
                 f.cur_row += vis_rows - 1;
                 clamp_col(f);
             }
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         // ---- Editing ----
 
         if (vk == VK_RETURN) {
+            if (readonly) {
+                draw(f, l, readonly);
+                continue;
+            }
             f.last_was_char = false; f.last_del_dir = 0;
             if (f.sel_row >= 0) {
                 int ar = f.sel_row, ac = f.sel_col, br = f.cur_row, bc = f.cur_col;
@@ -831,10 +923,14 @@ int edit_file(const std::string& path) {
             f.cur_row++;
             f.cur_col  = 0;
             f.modified = true;
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         if (vk == VK_BACK) {
+            if (readonly) {
+                draw(f, l, readonly);
+                continue;
+            }
             if (f.sel_row >= 0) {
                 int ar = f.sel_row, ac = f.sel_col, br = f.cur_row, bc = f.cur_col;
                 if (ar > br || (ar==br && ac>bc)) { std::swap(ar,br); std::swap(ac,bc); }
@@ -873,10 +969,14 @@ int edit_file(const std::string& path) {
                 f.cur_col  = prev_len;
                 f.modified = true;
             }
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         if (vk == VK_DELETE) {
+            if (readonly) {
+                draw(f, l, readonly);
+                continue;
+            }
             if (f.sel_row >= 0) {
                 int ar = f.sel_row, ac = f.sel_col, br = f.cur_row, bc = f.cur_col;
                 if (ar > br || (ar==br && ac>bc)) { std::swap(ar,br); std::swap(ac,bc); }
@@ -910,10 +1010,14 @@ int edit_file(const std::string& path) {
                 f.lines.erase(f.lines.begin() + f.cur_row + 1);
                 f.modified = true;
             }
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         if (vk == VK_TAB && shift) {
+            if (readonly) {
+                draw(f, l, readonly);
+                continue;
+            }
             // dedent: remove up to 4 leading spaces from each affected line
             auto dedent = [&](int row) -> int {
                 int removed = 0;
@@ -941,10 +1045,14 @@ int edit_file(const std::string& path) {
                     push_undo(f, cr, 0, cr, (int)old_line.size(), old_line, f.lines[cr], cr, cc, cr, cc);
             }
             f.modified = true;
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         if (vk == VK_TAB) {
+            if (readonly) {
+                draw(f, l, readonly);
+                continue;
+            }
             int cr = f.cur_row, cc = f.cur_col;
             f.last_was_char = false; f.last_del_dir = 0;
             if (f.sel_row >= 0) {
@@ -963,11 +1071,15 @@ int edit_file(const std::string& path) {
                 f.cur_col += 4;
             }
             f.modified = true;
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
 
         // printable character
         if (ch >= 32 && ch != 127 && !ctrl && !alt) {
+            if (readonly) {
+                draw(f, l, readonly);
+                continue;
+            }
             // drain any immediately pending chars — if the input buffer already has more,
             // this is a paste arriving char-by-char; batch the whole burst into one undo op
             std::wstring wbuf(1, ch);
@@ -1047,11 +1159,19 @@ int edit_file(const std::string& path) {
             if (is_word) f.last_was_char = true;
 
             f.modified = true;
-            clamp_scroll(f, vis_rows, vis_w); draw(f, l); continue;
+            clamp_scroll(f, vis_rows, vis_w); draw(f, l, readonly); continue;
         }
     }
 
     // clear editor screen before returning to shell
     out("\x1b[2J\x1b[H\x1b[?25h");
     return 0;
+}
+
+int edit_file(const std::string& path) {
+    return edit_file_mode(path, false);
+}
+
+int view_file(const std::string& path) {
+    return edit_file_mode(path, true);
 }

@@ -30,6 +30,21 @@ struct input {
     std::wstring pending_save;              // history entry waiting to be written to disk after execution result is known
 };
 
+static void refresh_prompt(input& e) {
+    std::string dir  = cwd();
+    std::string name = folder(dir);
+    std::string t    = cur_time();
+    std::wstring git_root;
+    std::string b    = branch(git_root);
+    bool d           = b.empty() ? false : dirty(git_root);
+
+    SetConsoleTitleA(name.c_str());
+
+    auto p = make_prompt(g_prompt_elev, t, name, b, d, g_prompt_code);
+    e.prompt_str = p.str;
+    e.prompt_vis = p.vis;
+}
+
 struct token_info {
     std::wstring text;
     int start = 0;
@@ -721,6 +736,15 @@ std::string readline(input& e) {
             e.buf.clear();
             e.pos = 0;
             return "";
+        }
+
+        if ((ctrl && vk == 'O') || vk == VK_F10) {
+            zex_toggle();
+            e.tab_on = false;
+            find_hint(e);
+            refresh_prompt(e);
+            redraw(e);
+            continue;
         }
 
         {

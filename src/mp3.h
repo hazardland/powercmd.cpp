@@ -35,6 +35,10 @@ struct mp3_player_t {
     ULONGLONG               play_started_tick = 0;
     ULONGLONG               pause_started_tick = 0;
     ULONGLONG               paused_ms = 0;
+    // folder playback state
+    std::vector<std::string>    folder_tracks;   // all .mp3 found recursively
+    std::vector<std::string>    folder_history;  // play history, oldest→newest; last = current
+    std::unordered_set<int>     folder_played;   // indices into folder_tracks already started
 };
 
 static mp3_player_t g_mp3;
@@ -71,6 +75,34 @@ static std::string mp3_mm_text(MMRESULT code) {
     return "audio device error";
 }
 
+static void mp3_scan_folder(const std::string& dir, std::vector<std::string>& out_tracks) {
+    std::wstring wdir = to_wide(dir) + L"\\*";
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(wdir.c_str(), &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        std::wstring name = fd.cFileName;
+        if (name == L"." || name == L"..") continue;
+        std::string full = dir + "\\" + to_utf8(name);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            mp3_scan_folder(full, out_tracks);
+        } else {
+            if (name.size() > 4) {
+                std::wstring ext = name.substr(name.size() - 4);
+                std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+                if (ext == L".mp3") out_tracks.push_back(full);
+            }
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+static void mp3_folder_clear() {
+    g_mp3.folder_tracks.clear();
+    g_mp3.folder_history.clear();
+    g_mp3.folder_played.clear();
+}
+
 static int mp3_elapsed_ms_locked() {
     if (g_mp3.state == mp3_loading || g_mp3.play_started_tick == 0) return 0;
 
@@ -103,6 +135,8 @@ struct mp3_snapshot_t {
     int volume = 100;
     double total_sec = 0.0;
     mp3_state_kind state = mp3_stopped;
+    int folder_pos = 0;   // 1-based index of current track in folder (0 = not in folder mode)
+    int folder_total = 0;
 };
 
 static std::string mp3_make_bars_locked(int elapsed_ms, int bar_count);
@@ -117,11 +151,13 @@ static mp3_snapshot_t mp3_snapshot() {
     snap.volume = g_mp3.volume;
     snap.total_sec = g_mp3.total_sec;
     snap.state = g_mp3.state;
+    snap.folder_total = (int)g_mp3.folder_tracks.size();
+    snap.folder_pos   = snap.folder_total > 0 ? (int)g_mp3.folder_history.size() : 0;
     return snap;
 }
 
 static bool mp3_decode_file(const std::string& path, std::vector<int16_t>& pcm, int& hz, int& channels, double& total_sec, std::string& error_text) {
-    std::ifstream f(path, std::ios::binary);
+    std::ifstream f(to_wide(path).c_str(), std::ios::binary);
     if (!f) {
         error_text = "mp3: cannot open file: " + path;
         return false;
@@ -360,6 +396,31 @@ static void mp3_stop_playback() {
     g_mp3.pcm_bytes.clear();
 }
 
+// Start playing a single file. Caller must already have stopped playback.
+// Does NOT clear folder state.
+static void mp3_start_track(const std::string& path) {
+    {
+        std::lock_guard<std::mutex> guard(g_mp3.lock);
+        g_mp3.last_error.clear();
+        g_mp3.path = path;
+        g_mp3.state = mp3_loading;
+    }
+    g_mp3.stop_flag = false;
+    g_mp3.worker = std::thread(mp3_worker_main, path);
+}
+
+// Pick a random unplayed track; returns index or -1 if all played.
+static int mp3_folder_pick_next() {
+    int total = (int)g_mp3.folder_tracks.size();
+    if (total == 0) return -1;
+    if ((int)g_mp3.folder_played.size() >= total) return -1;
+    std::vector<int> pool;
+    for (int i = 0; i < total; i++)
+        if (!g_mp3.folder_played.count(i)) pool.push_back(i);
+    if (pool.empty()) return -1;
+    return pool[rand() % pool.size()];
+}
+
 static int mp3_play_file(const std::string& arg) {
     std::string path = normalize_path(mp3_trim(arg));
     if (path.empty()) {
@@ -372,20 +433,38 @@ static int mp3_play_file(const std::string& arg) {
         err("mp3: file not found\r\n");
         return 1;
     }
+
     if (attr & FILE_ATTRIBUTE_DIRECTORY) {
-        err("mp3: folder playback is planned but not implemented yet\r\n");
-        return 1;
+        // Folder mode: scan, shuffle, play first random track
+        std::vector<std::string> tracks;
+        mp3_scan_folder(path, tracks);
+        if (tracks.empty()) {
+            err("mp3: no .mp3 files found in folder\r\n");
+            return 1;
+        }
+        mp3_stop_playback();
+        {
+            std::lock_guard<std::mutex> guard(g_mp3.lock);
+            mp3_folder_clear();
+            g_mp3.folder_tracks = tracks;
+        }
+        int idx = mp3_folder_pick_next();
+        {
+            std::lock_guard<std::mutex> guard(g_mp3.lock);
+            g_mp3.folder_played.insert(idx);
+            g_mp3.folder_history.push_back(g_mp3.folder_tracks[idx]);
+        }
+        mp3_start_track(g_mp3.folder_tracks[idx]);
+        return mp3_ui();
     }
 
+    // Single file mode — stop and clear folder state
     mp3_stop_playback();
     {
         std::lock_guard<std::mutex> guard(g_mp3.lock);
-        g_mp3.last_error.clear();
-        g_mp3.path = path;
-        g_mp3.state = mp3_loading;
+        mp3_folder_clear();
     }
-    g_mp3.stop_flag = false;
-    g_mp3.worker = std::thread(mp3_worker_main, path);
+    mp3_start_track(path);
     return mp3_ui();
 }
 
@@ -517,6 +596,7 @@ static std::string mp3_make_bars_locked(int elapsed_ms, int bar_count) {
         }
     }
 
+    // OLD renderer — restored
     std::string bars = "[";
     for (int i = 0; i < bar_count; i++) {
         int level = i < history_size ? (int)(history[i] + 0.5) : 0;
@@ -528,6 +608,43 @@ static std::string mp3_make_bars_locked(int elapsed_ms, int bar_count) {
     }
     bars += "]";
     return bars;
+
+    // NEW renderer (half-block, 16-level, color zones) — postponed, needs work
+    // auto zone_color = [](int sub) -> const char* {
+    //     if (sub <= 4)  return BLUE;
+    //     if (sub <= 9)  return YELLOW;
+    //     return RED;
+    // };
+    // std::string bars2 = "[";
+    // for (int i = 0; i < bar_count; i++) {
+    //     int level = i < history_size ? (int)(history[i] + 0.5) : 0;
+    //     level = std::max(0, std::min(level, 15));
+    //     if (level == 0) {
+    //         bars2 += ' ';
+    //     } else if (level == 1) {
+    //         bars2 += zone_color(0);
+    //         bars2 += "▄";
+    //         bars2 += RESET;
+    //     } else {
+    //         const char* bot = zone_color(level - 1);
+    //         const char* top = zone_color(level);
+    //         if (bot == top) {
+    //             bars2 += bot;
+    //             bars2 += "█";
+    //             bars2 += RESET;
+    //         } else {
+    //             bars2 += "\x1b[0m";
+    //             bars2 += bot;
+    //             if (top == BLUE)        bars2 += "\x1b[48;5;75m";
+    //             else if (top == YELLOW) bars2 += "\x1b[48;5;229m";
+    //             else                    bars2 += "\x1b[48;5;203m";
+    //             bars2 += "▄";
+    //             bars2 += RESET;
+    //         }
+    //     }
+    // }
+    // bars2 += "]";
+    // return bars2;
 }
 
 static void mp3_apply_volume_locked(int volume) {
@@ -640,8 +757,14 @@ static std::string mp3_ui_line() {
     snprintf(vol_buf, sizeof(vol_buf), "[%d%%]", snap.volume);
     std::string vol_text = vol_buf;
     std::string file_text = mp3_name_only(snap.path);
+    std::string counter_text;
+    if (snap.folder_total > 0) {
+        char cbuf[16];
+        snprintf(cbuf, sizeof(cbuf), "[%d/%d]", snap.folder_pos, snap.folder_total);
+        counter_text = cbuf;
+    }
     int width = term_width();
-    int fixed_visible = 14 + 1 + (int)strlen(time_buf) + 1 + (int)vol_text.size() + 1 + (int)state_icon.size();
+    int fixed_visible = 14 + 1 + (int)strlen(time_buf) + 1 + (int)vol_text.size() + 1 + (int)state_icon.size() + (counter_text.empty() ? 0 : 1 + (int)counter_text.size());
     int remain = width - fixed_visible - 1;
     if (remain < 0) remain = 0;
     if (!file_text.empty()) {
@@ -666,6 +789,12 @@ static std::string mp3_ui_line() {
     line += state_color;
     line += state_icon;
     line += RESET;
+    if (!counter_text.empty()) {
+        line += " ";
+        line += GRAY;
+        line += counter_text;
+        line += RESET;
+    }
     if (!file_text.empty()) {
         line += " ";
         line += GRAY;
@@ -688,10 +817,14 @@ static bool mp3_ui_key_pressed() {
     if (!ReadConsoleInputW(in_h, records.data(), count, &read)) return false;
 
     bool exit_ui = false;
+    bool do_next = false;
+    bool do_prev = false;
     for (DWORD i = 0; i < read; i++) {
         const INPUT_RECORD& rec = records[i];
         if (rec.EventType != KEY_EVENT || !rec.Event.KeyEvent.bKeyDown) continue;
-        WORD vk = rec.Event.KeyEvent.wVirtualKeyCode;
+        WORD vk    = rec.Event.KeyEvent.wVirtualKeyCode;
+        DWORD ctrl = rec.Event.KeyEvent.dwControlKeyState;
+        bool  held_ctrl = (ctrl & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
         if (vk == VK_ESCAPE) {
             exit_ui = true;
         } else if (vk == VK_UP) {
@@ -702,6 +835,10 @@ static bool mp3_ui_key_pressed() {
             mp3_apply_volume_locked(g_mp3.volume - 5);
         } else if (vk == VK_SPACE) {
             mp3_toggle_pause();
+        } else if (vk == VK_LEFT && held_ctrl) {
+            do_prev = true;
+        } else if (vk == VK_RIGHT && held_ctrl) {
+            do_next = true;
         } else if (vk == VK_LEFT) {
             std::lock_guard<std::mutex> guard(g_mp3.lock);
             mp3_seek_locked(mp3_elapsed_ms_locked() - 10000);
@@ -709,6 +846,33 @@ static bool mp3_ui_key_pressed() {
             std::lock_guard<std::mutex> guard(g_mp3.lock);
             mp3_seek_locked(mp3_elapsed_ms_locked() + 10000);
         }
+    }
+    if (do_next) {
+        std::string next_path;
+        {
+            std::lock_guard<std::mutex> guard(g_mp3.lock);
+            if (!g_mp3.folder_tracks.empty()) {
+                int idx = mp3_folder_pick_next();
+                if (idx >= 0) {
+                    g_mp3.folder_played.insert(idx);
+                    g_mp3.folder_history.push_back(g_mp3.folder_tracks[idx]);
+                    next_path = g_mp3.folder_tracks[idx];
+                }
+            }
+        }
+        if (!next_path.empty()) { mp3_stop_playback(); mp3_start_track(next_path); }
+    }
+    if (do_prev) {
+        std::string prev_path;
+        {
+            std::lock_guard<std::mutex> guard(g_mp3.lock);
+            // history tail is current, one before that is prev
+            if (g_mp3.folder_history.size() >= 2) {
+                g_mp3.folder_history.pop_back(); // drop current
+                prev_path = g_mp3.folder_history.back();
+            }
+        }
+        if (!prev_path.empty()) { mp3_stop_playback(); mp3_start_track(prev_path); }
     }
     return exit_ui;
 }
@@ -722,7 +886,30 @@ static int mp3_ui() {
 
     while (true) {
         snap = mp3_snapshot();
-        if (snap.state == mp3_stopped && snap.path.empty()) break;
+        // Track finished naturally — try auto-advance in folder mode
+        if (snap.state == mp3_stopped && snap.path.empty()) {
+            std::string next_path;
+            {
+                std::lock_guard<std::mutex> guard(g_mp3.lock);
+                if (!g_mp3.folder_tracks.empty()) {
+                    int idx = mp3_folder_pick_next();
+                    if (idx >= 0) {
+                        g_mp3.folder_played.insert(idx);
+                        g_mp3.folder_history.push_back(g_mp3.folder_tracks[idx]);
+                        next_path = g_mp3.folder_tracks[idx];
+                    } else {
+                        // All tracks played — clear and stop
+                        mp3_folder_clear();
+                    }
+                }
+            }
+            if (!next_path.empty()) {
+                mp3_stop_playback();
+                mp3_start_track(next_path);
+                continue;
+            }
+            break;
+        }
         out("\r\x1b[2K" + mp3_ui_line());
         if (mp3_ui_key_pressed()) break;
     }
@@ -737,21 +924,68 @@ static int mp3_cmd(const std::string& line) {
 
     if (args.empty()) {
         out(
-            GREEN "mp3" RESET " <file>       Play one MP3 file\r\n"
-            GREEN "mp3 pause" RESET "       Pause playback\r\n"
-            GREEN "mp3 resume" RESET "      Resume playback\r\n"
-            GREEN "mp3 stop" RESET "        Stop playback\r\n"
+            GREEN "mp3" RESET " <file>        Play one MP3 file\r\n"
+            GREEN "mp3" RESET " <folder>      Play all MP3s in folder recursively (shuffled)\r\n"
+            GREEN "mp3 next" RESET "          Skip to next random track in folder\r\n"
+            GREEN "mp3 prev" RESET "          Go back to previous track\r\n"
+            GREEN "mp3 pause" RESET "         Pause playback\r\n"
+            GREEN "mp3 resume" RESET "        Resume playback\r\n"
+            GREEN "mp3 stop" RESET "          Stop playback and clear queue\r\n"
             GREEN "mp3 vol" RESET " <0-100>   Set playback volume\r\n"
-            GREEN "mp3 status" RESET "      Show playback status\r\n"
-            GREEN "mp3 ui" RESET "          Show temporary now-playing line\r\n"
+            GREEN "mp3 status" RESET "        Show playback status\r\n"
+            GREEN "mp3 ui" RESET "            Show now-playing line  Space:pause  ←→:seek  Ctrl+←→:prev/next  ↑↓:vol  Esc:exit\r\n"
         );
         return 0;
     }
 
     if (lower == "status") return mp3_show_status();
 
+    if (lower == "next") {
+        std::string next_path;
+        {
+            std::lock_guard<std::mutex> guard(g_mp3.lock);
+            if (g_mp3.folder_tracks.empty()) {
+                err("mp3: not in folder mode\r\n");
+                return 1;
+            }
+            int idx = mp3_folder_pick_next();
+            if (idx < 0) {
+                out("mp3: all tracks played\r\n");
+                mp3_stop_playback();
+                return 0;
+            }
+            g_mp3.folder_played.insert(idx);
+            g_mp3.folder_history.push_back(g_mp3.folder_tracks[idx]);
+            next_path = g_mp3.folder_tracks[idx];
+        }
+        mp3_stop_playback();
+        mp3_start_track(next_path);
+        return 0;
+    }
+
+    if (lower == "prev") {
+        std::string prev_path;
+        {
+            std::lock_guard<std::mutex> guard(g_mp3.lock);
+            if (g_mp3.folder_tracks.empty()) {
+                err("mp3: not in folder mode\r\n");
+                return 1;
+            }
+            if (g_mp3.folder_history.size() < 2) {
+                err("mp3: no previous track\r\n");
+                return 1;
+            }
+            g_mp3.folder_history.pop_back();
+            prev_path = g_mp3.folder_history.back();
+        }
+        mp3_stop_playback();
+        mp3_start_track(prev_path);
+        return 0;
+    }
+
     if (lower == "stop") {
         mp3_stop_playback();
+        mp3_folder_clear();
         out("mp3: stopped\r\n");
         return 0;
     }

@@ -208,11 +208,12 @@ void ls(const std::string& arg, const std::string& filter = "") {
 
     for (auto& e : all) {
         std::string name = to_utf8(e.name) + (e.is_dir ? "/" : "");
+        int vis_w = (int)e.name.size() + (e.is_dir ? 1 : 0);
         std::string row;
         if (!e.color.empty()) row += e.color;
         row += name;
         if (!e.color.empty()) row += RESET;
-        row += std::string(max_w - (int)name.size() + 2, ' ');
+        row += std::string(max_w - vis_w + 2, ' ');
         if (show_size) {
             std::string sz = e.is_dir ? "" : fmt_size(e.size);
             row += std::string(std::max(0, 6 - (int)sz.size()), ' ') + sz + "  ";

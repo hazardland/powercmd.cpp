@@ -9,9 +9,11 @@
 #include "src/info.h"     // elevated, cur_time, cwd, folder, branch, dirty
 #include "src/prompt.h"   // prompt_t, make_prompt
 #include "src/complete.h" // complete() — tab completion
+void zex_toggle();
 #include "src/input.h"    // struct input, find_hint, redraw, readline (calls append_history via fwd-decl)
 #include "src/persist.h"  // history, aliases, prev_dir (defines append_history used above)
 #include "src/commands.h" // cd, ls, run, run_bash, which, rule
+#include "src/zex.h"      // zex_toggle(), ZEX screen-buffer UI
 #include "src/image.h"    // cat_image, imgpush_cell (shared with video.h)
 #include "src/video.h"    // cat_video (uses imgpush_cell from image.h)
 #include "src/highlight.h" // detect_lang, colorize_inline, colorize_line
@@ -104,6 +106,8 @@ int main() {
 
         SetConsoleTitleA(name.c_str());
 
+        g_prompt_elev = elev;
+        g_prompt_code = last_code;
         auto p = make_prompt(elev, t, name, b, d, last_code);
         e.prompt_str  = p.str;
         e.prompt_vis  = p.vis;
@@ -188,8 +192,8 @@ int main() {
                 GREEN "top" RESET "      Interactive process viewer  [↑↓] navigate  [m/c] sort  [k] kill  [q] quit\r\n"
                 GREEN "clock" RESET "    Live fullscreen clock  any key to exit\r\n"
                 GREEN "stopw" RESET "    Stopwatch counting up  any key stops and prints result\r\n"
-                GREEN "mp3" RESET "      Play MP3 files  pause/resume/stop/vol/status/ui\r\n"
-                GREEN "play" RESET "     Hardcoded alias for mp3\r\n"
+                GREEN "mp3" RESET "      Play MP3 file or folder (shuffled)  next/prev/pause/resume/stop/vol/status/ui\r\n"
+                GREEN "play" RESET "     Alias for mp3\r\n"
                 GREEN "yt" RESET "       YouTube downloader  yt mp3 <url> [folder]  yt mp4 <url> [folder]\r\n"
                 GREEN "calc" RESET "     Evaluate arithmetic  calc (2+3)*4^2\r\n"
                 "        Alias: = (2+3)*4^2\r\n"
@@ -237,6 +241,12 @@ int main() {
         if (lower == "clock") {
             clock_cmd();
             last_code = 0;
+            continue;
+        }
+
+        if (lower == "re") {
+            cd("cd ~~");
+            last_code = run("build.bat");
             continue;
         }
 

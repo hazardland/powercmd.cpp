@@ -10,6 +10,10 @@ struct prompt_t {
     int vis;         // printable character count (no escape codes)
 };
 
+// Current shell prompt context, refreshed by main before each readline() call.
+static bool g_prompt_elev = false;
+static int  g_prompt_code = 0;
+
 // Builds the "[time]folder[branch*][exitcode]> " prompt and computes vis in one pass.
 // Exit code segment is omitted when code == 0; branch segment omitted when b is empty.
 prompt_t make_prompt(bool elev, const std::string& t, const std::string& f,

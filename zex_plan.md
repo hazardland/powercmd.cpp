@@ -38,6 +38,15 @@ struct ZexState {
 };
 ```
 
+Future refinement:
+- ZEX should have an explicit focus mode separate from active panel state
+- Active panel answers "which panel is selected"
+- Focus mode answers "which UI element currently owns keyboard input"
+- Example focus modes: panel navigation, filter input, modal dialog, progress/confirm prompt
+- When filter input has focus, panel navigation keys must be disabled
+- When a modal dialog has focus, both panel navigation and filter editing must be disabled
+- Filter text is separate state from focus; entering filter mode gives focus to filter input, leaving it returns focus to panel navigation
+
 ---
 
 ## Layout
@@ -62,6 +71,7 @@ struct ZexState {
 - Entry colors follow zcmd color scheme (blue=dirs, green=exe, etc.)
 - Selected entries override color to yellow=229
 - Cursor row has background highlight
+- ZEX layout must adapt live to console resize in both width and height; redraw against the new active window/buffer size instead of keeping the old frame
 
 ---
 
@@ -105,7 +115,11 @@ with `ls`, the mp3 visualizer, and the prompt.
 
 ## Filter Logic
 
-Two modes, auto-detected per keystroke:
+Filter mode opens explicitly with `/`.
+Normal printable typing outside filter mode does not filter the list; it performs
+a quick jump to the next file or folder whose name starts with the typed prefix.
+
+Inside filter mode there are two matching modes, auto-detected per keystroke:
 
 | Condition          | Mode       | Behavior                                      |
 |--------------------|------------|-----------------------------------------------|
@@ -119,6 +133,15 @@ Examples:
 - `b`         → matches any entry containing `b`
 
 Filter is case-insensitive. `..` always shown regardless of filter.
+
+### Quick Jump
+
+- Printable typing outside filter mode builds a temporary jump prefix
+- Cursor moves to the next entry whose name starts with that prefix
+- Repeated typing extends the prefix while the user is actively typing
+- `Backspace` removes the last jump character
+- `Esc` clears the jump prefix
+- `/` switches from normal navigation into filter input mode
 
 ---
 
@@ -205,6 +228,8 @@ Ctrl+O pressed again (re-enter ZEX):
 ```
 
 Both buffers live in memory the whole session — switching is instant.
+If the console window is resized while ZEX is visible, the ZEX buffer and layout
+must resize and redraw to match the new console dimensions.
 
 ---
 
@@ -226,9 +251,15 @@ Both buffers live in memory the whole session — switching is instant.
 | `F6`         | Move                                                     |
 | `F8`         | Delete → recycle bin                                     |
 | `Shift+F8`   | Delete permanent                                         |
-| `Esc`        | Clear filter if typing, else clear selection             |
-| Printable    | Append to filter, re-filter entries                      |
-| `Backspace`  | Remove last filter char (when filter non-empty)          |
+| `/`          | Enter filter input mode                                  |
+| `Esc`        | Clear filter if typing, else clear jump/selection        |
+| Printable    | Quick-jump by filename prefix when not filtering         |
+| `Backspace`  | Filter backspace in filter mode, else quick-jump backspace |
+
+Focus rule:
+- Input handling should first route by focus mode, then by active panel
+- If focus is on filter input, panel navigation keys do not act on the panel
+- If focus is on a dialog, only dialog keys are handled until it closes
 
 ---
 
@@ -268,14 +299,17 @@ Drawn in the center of the screen during F5/F6 operations:
 - `↑` / `↓` cursor movement with scroll
 - `Enter` navigates into dirs, `Backspace` goes up
 - `Home` / `End` / `PgUp` / `PgDn`
+- Live resize should redraw the frame to the new console size
 - Cwd sync to prompt on `Ctrl+O` exit
 
 ### Phase 3 — Filter
-- Typing appends to `panel.filter`, triggers re-filter
-- `Backspace` removes last char when filter non-empty
-- `Esc` clears filter
+- `/` enters filter mode for the active panel
+- Typing in filter mode appends to `panel.filter`, triggers re-filter
+- `Backspace` removes last filter char when filter non-empty
+- `Esc` clears filter and exits filter mode
 - Auto-detect substring vs glob mode
 - Filter bar renders current pattern
+- Normal typing outside filter mode performs quick-jump by prefix
 
 ### Phase 4 — Selection
 - `Insert` toggles selection, advances cursor
