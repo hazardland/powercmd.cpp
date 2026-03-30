@@ -232,8 +232,94 @@ static std::string rule() {
     return s;
 }
 
+// Tools known to mutate the environment (PATH, runtime vars, etc.) via .cmd/.bat wrappers.
+// For these, we capture the post-command environment and import it back into Zcmd.
+static const std::unordered_set<std::string> env_mutators = {
+    // Node version managers
+    "nvs", "nvm", "fnm", "volta", "nodenv",
+    // Python env managers
+    "pyenv", "conda", "mamba", "micromamba", "uv", "pipenv", "poetry", "hatch", "pdm",
+    // Universal version manager
+    "asdf",
+    // Ruby
+    "rbenv", "rvm", "chruby",
+    // Java
+    "jenv", "jabba", "sdk",
+    // Go
+    "goenv", "gvm",
+    // Visual Studio build environments
+    "vcvarsall", "vcvars64", "vcvars32", "vcvarsarm64", "vsvars32",
+};
+
+static bool is_env_mutator(const std::string& line) {
+    size_t sp = line.find(' ');
+    std::string tok = sp == std::string::npos ? line : line.substr(0, sp);
+    std::transform(tok.begin(), tok.end(), tok.begin(), ::tolower);
+    size_t dot = tok.rfind('.');
+    if (dot != std::string::npos) tok = tok.substr(0, dot);
+    return env_mutators.count(tok) > 0;
+}
+
+// Runs an env-mutating command and imports the resulting environment into Zcmd's process.
+// Uses cmd /v:on so !errorlevel! captures the runtime exit code of the user command.
+static int run_capture_env(const std::string& line) {
+    char tmp_dir[MAX_PATH], tmp_file[MAX_PATH];
+    if (!GetTempPathA(MAX_PATH, tmp_dir) || !GetTempFileNameA(tmp_dir, "ze", 0, tmp_file)) {
+        // Temp file unavailable — fall through to normal run()
+        std::wstring cmd = L"cmd.exe /c " + to_wide(line);
+        std::vector<wchar_t> buf(cmd.begin(), cmd.end()); buf.push_back(0);
+        STARTUPINFOW si = {}; si.cb = sizeof(si); PROCESS_INFORMATION pi = {};
+        if (!CreateProcessW(NULL, buf.data(), NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) return -1;
+        SetConsoleMode(in_h, orig_in_mode);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        SetConsoleMode(in_h, ENABLE_EXTENDED_FLAGS | ENABLE_QUICK_EDIT_MODE | ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT);
+        DWORD code = 0; GetExitCodeProcess(pi.hProcess, &code);
+        CloseHandle(pi.hProcess); CloseHandle(pi.hThread);
+        return (int)code;
+    }
+
+    // Build: cmd /v:on /c <line> & set _ZCMD_EL_=!errorlevel! & set > "tmpfile" & exit /b !_ZCMD_EL_!
+    std::wstring tmp_w = to_wide(std::string(tmp_file));
+    std::wstring cmd = L"cmd.exe /v:on /c " + to_wide(line)
+        + L" & set _ZCMD_EL_=!errorlevel! & set > \""  + tmp_w + L"\" & exit /b !_ZCMD_EL_!";
+    std::vector<wchar_t> buf(cmd.begin(), cmd.end()); buf.push_back(0);
+    STARTUPINFOW si = {}; si.cb = sizeof(si);
+    PROCESS_INFORMATION pi = {};
+    if (!CreateProcessW(NULL, buf.data(), NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi)) {
+        DeleteFileA(tmp_file);
+        return -1;
+    }
+    SetConsoleMode(in_h, orig_in_mode);
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    SetConsoleMode(in_h, ENABLE_EXTENDED_FLAGS | ENABLE_QUICK_EDIT_MODE | ENABLE_WINDOW_INPUT | ENABLE_MOUSE_INPUT);
+    DWORD code = 0;
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hProcess);
+    CloseHandle(pi.hThread);
+
+    // Import env changes into Zcmd's process
+    std::ifstream f(tmp_file);
+    if (f) {
+        std::string env_line;
+        while (std::getline(f, env_line)) {
+            if (!env_line.empty() && env_line.back() == '\r') env_line.pop_back();
+            size_t eq = env_line.find('=');
+            if (eq == std::string::npos || eq == 0) continue;
+            std::string name = env_line.substr(0, eq);
+            std::string val  = env_line.substr(eq + 1);
+            if (name[0] == '=') continue;        // internal cmd.exe drive-tracking vars
+            if (name == "_ZCMD_EL_") continue;   // our own marker
+            SetEnvironmentVariableA(name.c_str(), val.c_str());
+        }
+        f.close();
+    }
+    DeleteFileA(tmp_file);
+    return (int)code;
+}
+
 // Spawns "cmd.exe /c <line>" and waits for it to finish. Returns the child's exit code.
 int run(const std::string& line) {
+    if (is_env_mutator(line)) return run_capture_env(line);
     std::wstring cmd = L"cmd.exe /c " + to_wide(line);
     std::vector<wchar_t> buf(cmd.begin(), cmd.end());
     buf.push_back(0);

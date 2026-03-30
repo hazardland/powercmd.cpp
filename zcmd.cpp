@@ -57,7 +57,7 @@ int main() {
         BRIGHT_YELLOW " \xe2\x96\x88   \xe2\x96\x88   \xe2\x96\x88 \xe2\x96\x88 \xe2\x96\x88\r\n"                             // CMD:  █   █   █ █ █
         BLUE "\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88\xe2\x96\x88"                                                       // Z: ████
         BRIGHT_YELLOW " \xe2\x96\x80\xe2\x96\x88\xe2\x96\x88 \xe2\x96\x88   \xe2\x96\x88 \xe2\x96\x88\xe2\x96\x88\xe2\x96\x80\r\n"   // CMD:  ▀██ █   █ ██▀
-        RESET GRAY "Zcmd v" VERSION RESET "\r\n"
+        RESET GRAY "Zcmd v" VERSION " (https://zcmd.dev) " RESET "\r\n"
     );
     // Print Windows build info
     {
@@ -83,6 +83,11 @@ int main() {
 
     int last_code = 0;
     while (true) {
+        if (!e.pending_save.empty()) {
+            if (last_code == 0) append_history(e.pending_save);
+            e.pending_save.clear();
+        }
+
         std::string dir  = cwd();
         std::string name = folder(dir);
         std::string t    = cur_time();

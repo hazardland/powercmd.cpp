@@ -5,9 +5,6 @@
 # cat *.mp4
 - Sound
 
-# Youtube to mp3 downloader
-- yt link [folder to save default current folder], we will only implement this if we will not need some 3d parity library, the only exception is ffmpeg usage in all media kind of tasks because it can exist in system if not we say wingget install ffmpeg pls
-
 # Midnight Commander 
 - ctrl+o immidiatly toggles to terminal and to commander
 - commander can navigate folders middnight commander style
@@ -22,3 +19,5 @@
 
 # Pipes
 - make builtin commands work with pipes with outer tools
+
+# Resource monitor

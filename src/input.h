@@ -26,6 +26,8 @@ struct input {
     int tab_start = 0;                      // start offset of the token being completed within buf
     std::wstring tab_pre;                   // buf content before the completion token; preserved across cycles
     std::wstring tab_suf;                   // buf content after cursor at Tab-press time; reappended each cycle
+
+    std::wstring pending_save;              // history entry waiting to be written to disk after execution result is known
 };
 
 struct token_info {
@@ -531,7 +533,7 @@ std::string readline(input& e) {
                 std::wstring hist_entry = e.buf;
                 e.hist.erase(std::remove(e.hist.begin(), e.hist.end(), hist_entry), e.hist.end());
                 e.hist.push_back(hist_entry);
-                append_history(hist_entry);
+                e.pending_save = hist_entry;
             }
             e.buf.clear();
             e.pos       = 0;
