@@ -53,26 +53,20 @@
 - Major/minor version jumps are manual.
 
 ## Releases
-- Build the release through `build.bat` from the repo root.
-- A successful build produces `zcmd.exe` and bumps `version.txt` to the release patch version.
-- Commit the release version change on a branch first, then merge to `master`.
-- Push `master` before creating the GitHub release so the release tag points at the intended commit.
-- Create and push the tag explicitly before calling `gh release create`.
+- By default, a user request to release means the binary is already built and `version.txt` already contains the intended release patch version.
+- For a normal release request, do not run `build.bat`.
+- For a normal release request, do not edit `version.txt`.
+- For a normal release request, do not commit, merge, tag, or push unless the user explicitly asks for that as a separate step.
 - Use release tags in `v0.0.X` format and release titles in `zcmd v0.0.X` format.
 - Always attach `zcmd.exe` as the GitHub release asset.
-- Safe release flow:
-  `build.bat`
-  `git add version.txt`
-  `git commit -m "Release v0.0.X"`
-  `git checkout master`
-  `git merge <release-branch>`
-  `git push origin master`
-  `git tag v0.0.X`
-  `git push origin v0.0.X`
-  `gh release create v0.0.X .\zcmd.exe --verify-tag --title "zcmd v0.0.X" --notes "Release v0.0.X"`
+- Default release flow:
+  Read `version.txt`
+  Release `.\zcmd.exe` as `v0.0.X`
+  Example: `gh release create v0.0.X .\zcmd.exe --title "zcmd v0.0.X" --notes "Release v0.0.X"`
 - If the asset needs to be replaced on an existing release, use:
   `gh release upload v0.0.X .\zcmd.exe --clobber`
-- Do not rely on `gh release create` to auto-create the tag from local-only commits; without a pushed tag it can publish from the current remote `master` tip instead.
+- Commit, push, branch cleanup, and tag/source alignment are separate follow-up tasks and should not be done as part of a normal release request unless explicitly requested.
+- This shortcut flow may leave the GitHub release tag temporarily pointing at the current remote state instead of the local unpushed commit; fixing that later is a separate explicit task.
 
 ## Notes
 - `build.bat` already kills running `zcmd.exe` before building.
