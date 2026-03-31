@@ -2,7 +2,7 @@
 
 > Formerly **Powerline.bat** → **PowerCMD** → **Zcmd**
 
-![Zcmd demo](./images/pcmd_cat_video.gif)
+![Zcmd demo](./images/zcmd_showcase.gif)
 
 ## Why
 
