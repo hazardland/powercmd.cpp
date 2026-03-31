@@ -193,7 +193,7 @@ int main() {
                 GREEN "notes" RESET "    Open ~/notes.md in the editor\r\n"
                 GREEN "ip" RESET "       Show local IPv4 addresses\r\n"
                 GREEN "top" RESET "      Interactive process viewer  [↑↓] navigate  [m/c] sort  [k] kill  [q] quit\r\n"
-                GREEN "resmon" RESET "   Live system monitor  cpu ram power network  Esc/q exit\r\n"
+                GREEN "resmon" RESET "   Live resource monitor with history graphs  cpu gpu ram battery net  Esc/q exit\r\n"
                 GREEN "clock" RESET "    Live fullscreen clock  any key to exit\r\n"
                 GREEN "stopw" RESET "    Stopwatch counting up  any key stops and prints result\r\n"
                 GREEN "explore" RESET "  Two-panel file manager  Ctrl+O/F10 toggle\r\n"

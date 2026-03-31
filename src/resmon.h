@@ -66,6 +66,12 @@ struct resmon_state_t {
     std::unordered_map<uint64_t, double> last_gpu_loads;
     ULONGLONG prev_net_tick = 0;
     std::unordered_map<ULONG, std::pair<ULONG64, ULONG64>> prev_net_bytes;
+    std::vector<double> cpu_history;
+    std::vector<std::vector<double>> core_history;
+    std::vector<double> memory_history;
+    std::vector<double> battery_history;
+    std::unordered_map<uint64_t, std::vector<double>> gpu_history;
+    std::unordered_map<std::string, std::vector<double>> net_history;
 };
 
 typedef NTSTATUS (NTAPI *resmon_nt_query_system_information_t)(
@@ -289,6 +295,42 @@ static std::string resmon_fmt_uptime(ULONGLONG uptime_ms) {
     return buf;
 }
 
+static void resmon_history_push(std::vector<double>& history, double value, size_t max_len = 256) {
+    if (value < 0.0) value = 0.0;
+    if (value > 100.0) value = 100.0;
+    history.push_back(value);
+    if (history.size() > max_len)
+        history.erase(history.begin(), history.begin() + (history.size() - max_len));
+}
+
+static const char* resmon_pct_color(double pct) {
+    if (pct <= 25.0) return BLUE;
+    if (pct >= 75.0) return RED;
+    return BRIGHT_YELLOW;
+}
+
+static std::string resmon_graph(const std::vector<double>& history, int width, const char* color = nullptr) {
+    static const char* glyphs[] = {" ", "▁", "▂", "▃", "▄", "▅", "▆", "▇", "█"};
+    if (width < 1) width = 1;
+
+    std::string out;
+    int start = (int)history.size() > width ? (int)history.size() - width : 0;
+    int pad = width - ((int)history.size() - start);
+    for (int i = 0; i < pad; i++)
+        out += std::string(GRAY) + " " + RESET;
+
+    for (int i = start; i < (int)history.size(); i++) {
+        double pct = history[i];
+        int level = (int)std::round((pct / 100.0) * 8.0);
+        if (level < 0) level = 0;
+        if (level > 8) level = 8;
+        out += color ? color : resmon_pct_color(pct);
+        out += glyphs[level];
+        out += RESET;
+    }
+    return out;
+}
+
 static std::string resmon_bar(double pct, int width, const char* color = nullptr) {
     static const char* glyphs[] = {" ", "▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"};
     if (width < 2) width = 2;
@@ -311,28 +353,27 @@ static std::string resmon_bar(double pct, int width, const char* color = nullptr
     return out;
 }
 
-static int resmon_metric_bar_width(int cols) {
-    int width = cols / 4;
-    if (width < 14) width = 14;
-    if (width > 28) width = 28;
+static int resmon_metric_graph_width(int cols, int suffix_visible) {
+    int width = cols - 2 - 8 - 1 - 2 - suffix_visible;
+    if (width < 1) width = 1;
     return width;
 }
 
-static std::string resmon_metric_line(const std::string& label, double pct, int cols, const char* color, const std::string& suffix) {
-    int bar_width = resmon_metric_bar_width(cols);
-    std::string out = "  " + std::string(GRAY) + resmon_pad_right(label, 8) + " " +
-        resmon_bar(pct, bar_width) + "  " + color + suffix + RESET;
-    return out;
+static std::string resmon_metric_line(const std::string& label, const std::vector<double>& history,
+    int cols, const std::string& suffix, const char* suffix_color, const char* graph_color = nullptr) {
+    int graph_width = resmon_metric_graph_width(cols, (int)suffix.size());
+    return "  " + std::string(GRAY) + resmon_pad_right(label, 8) + " " +
+        resmon_graph(history, graph_width, graph_color) + "  " + suffix_color + suffix + RESET;
 }
 
 static std::string resmon_power_text(const resmon_snapshot_t& snap);
 
-static std::string resmon_battery_line(const resmon_snapshot_t& snap, int cols) {
-    double pct = (snap.has_battery && snap.battery_percent <= 100) ? (double)snap.battery_percent : 0.0;
-    int bar_width = resmon_metric_bar_width(cols);
-    std::string suffix = resmon_power_text(snap);
-    return "  " + std::string(GRAY) + resmon_pad_right("Battery", 8) + " " +
-        resmon_bar(pct, bar_width, GREEN) + "  " + YELLOW + suffix + RESET;
+static std::string resmon_battery_line(const resmon_snapshot_t& snap, const std::vector<double>& history, int cols) {
+    if (!snap.has_battery || snap.battery_percent > 100)
+        return resmon_metric_line("Battery", history, cols, "n/a", GRAY, GREEN);
+    char pct_buf[16];
+    snprintf(pct_buf, sizeof(pct_buf), "%u%%", (unsigned)snap.battery_percent);
+    return resmon_metric_line("Battery", history, cols, pct_buf, YELLOW, GREEN);
 }
 
 static double resmon_network_pct(const resmon_net_t& net) {
@@ -344,48 +385,47 @@ static double resmon_network_pct(const resmon_net_t& net) {
     return pct;
 }
 
-static std::string resmon_network_line(const resmon_net_t& net, int cols) {
-    std::string rx_text = resmon_fmt_rate(net.rx_bytes_per_sec);
-    std::string tx_text = resmon_fmt_rate(net.tx_bytes_per_sec);
-    std::string link_text = resmon_fmt_link(net.link_bits_per_sec);
-    bool show_link = cols >= 105;
-    int suffix_visible = 3 + (int)rx_text.size() + 2 + 3 + (int)tx_text.size();
-    if (show_link)
-        suffix_visible += 2 + 5 + (int)link_text.size();
-
-    int available = cols - 2 - 2 - suffix_visible;
-    if (available < 12) available = 12;
-
-    int label_width = available / 2;
-    if (label_width < 8) label_width = 8;
-    if (label_width > 16) label_width = 16;
-
-    int bar_width = available - label_width - 1;
-    if (bar_width < 6) {
-        int needed = 6 - bar_width;
-        label_width -= needed;
-        if (label_width < 6) label_width = 6;
-        bar_width = available - label_width - 1;
-        if (bar_width < 6) bar_width = 6;
-    }
-    if (bar_width > 16) bar_width = 16;
-
-    std::string label = resmon_trim_label(net.name, label_width);
-    std::string suffix = std::string(RESMON_CYAN) + "RX " + rx_text + RESET +
-        "  " + GREEN + "TX " + tx_text + RESET;
-    if (show_link)
-        suffix += std::string("  ") + GRAY + "Link " + BLUE + link_text + RESET;
-
-    return "  " + std::string(GRAY) + resmon_pad_right(label, label_width) + " " +
-        resmon_bar(resmon_network_pct(net), bar_width) + "  " + suffix;
+static std::string resmon_network_line(const resmon_net_t& net, const std::vector<double>& history, int cols, int idx) {
+    char label[16];
+    char pct_buf[16];
+    snprintf(label, sizeof(label), "Net %02d", idx);
+    snprintf(pct_buf, sizeof(pct_buf), "%.1f%%", resmon_network_pct(net));
+    return resmon_metric_line(label, history, cols, pct_buf, RESMON_CYAN);
 }
 
-static std::string resmon_core_line(int idx, double pct, int cols) {
+static std::string resmon_core_line(int idx, const std::vector<double>& history, double pct, int cols) {
     char label[64];
     char pct_buf[32];
     snprintf(label, sizeof(label), "Core %02d", idx);
     snprintf(pct_buf, sizeof(pct_buf), "%5.1f%%", pct);
-    return resmon_metric_line(label, pct, cols, BLUE, pct_buf);
+    return resmon_metric_line(label, history, cols, pct_buf, BLUE);
+}
+
+static std::string resmon_detail_line(const std::string& label, const std::string& text, int cols, const char* color = SILVER) {
+    int label_width = 8;
+    int text_width = cols - 2 - label_width - 1;
+    if (text_width < 1) text_width = 1;
+    return "  " + std::string(GRAY) + resmon_pad_right(label, label_width) + " " +
+        color + resmon_trim_label(text, (size_t)text_width) + RESET;
+}
+
+static void resmon_update_history(resmon_state_t& state, const resmon_snapshot_t& snap) {
+    resmon_history_push(state.cpu_history, snap.cpu);
+    resmon_history_push(state.memory_history, (double)snap.memory_load);
+
+    if (snap.has_battery && snap.battery_percent <= 100)
+        resmon_history_push(state.battery_history, (double)snap.battery_percent);
+
+    if (state.core_history.size() < snap.core_cpu.size())
+        state.core_history.resize(snap.core_cpu.size());
+    for (size_t i = 0; i < snap.core_cpu.size(); i++)
+        resmon_history_push(state.core_history[i], snap.core_cpu[i]);
+
+    for (const auto& gpu : snap.gpus)
+        resmon_history_push(state.gpu_history[gpu.luid_key], gpu.usage_pct);
+
+    for (const auto& net : snap.nets)
+        resmon_history_push(state.net_history[net.name], resmon_network_pct(net));
 }
 
 static std::string resmon_power_text(const resmon_snapshot_t& snap) {
@@ -612,6 +652,7 @@ static void resmon_cmd() {
     resmon_state_t state;
     resmon_snapshot_t snap;
     resmon_sample(state, snap);
+    resmon_update_history(state, snap);
 
     out("\x1b[?25l\x1b[2J");
     int prev_cols = 0;
@@ -635,9 +676,10 @@ static void resmon_cmd() {
         ULONGLONG now = GetTickCount64();
         int cols = term_width();
         int rows = term_height();
-        if (now - last_sample >= 500 || cols != prev_cols || rows != prev_rows) {
+        if (now - last_sample >= 250 || cols != prev_cols || rows != prev_rows) {
             snap = {};
             resmon_sample(state, snap);
+            resmon_update_history(state, snap);
             last_sample = now;
 
             std::string frame;
@@ -655,70 +697,100 @@ static void resmon_cmd() {
             resmon_draw_line(frame, sep);
             used_rows++;
 
-            double memory_used = (double)(snap.memory_total - snap.memory_avail);
-            char cpu_buf[64];
-            snprintf(cpu_buf, sizeof(cpu_buf), "%.1f%%  %lu logical", snap.cpu, (unsigned long)snap.logical_cpus);
-            std::string cpu_line = resmon_metric_line("CPU", snap.cpu, cols, GREEN, cpu_buf);
-            resmon_draw_line(frame, cpu_line);
-            used_rows++;
+            std::vector<std::string> overview_head_lines;
+            std::vector<std::string> overview_tail_lines;
+            std::vector<std::string> core_lines;
+            std::vector<std::string> detail_lines;
 
-            if (!snap.core_cpu.empty()) {
-                int fixed_rows_after_cores = 6 + (int)snap.gpus.size();
-                int min_net_rows = 3;
-                int max_core_rows = rows - used_rows - fixed_rows_after_cores - min_net_rows;
-                if (max_core_rows < 1) max_core_rows = 1;
-                int shown_rows = std::min((int)snap.core_cpu.size(), max_core_rows);
-                for (int i = 0; i < shown_rows; i++) {
-                    resmon_draw_line(frame, resmon_core_line(i, snap.core_cpu[i], cols));
-                    used_rows++;
-                }
-                if (shown_rows < (int)snap.core_cpu.size()) {
-                    int hidden = (int)snap.core_cpu.size() - shown_rows;
-                    resmon_draw_line(frame, "    " + std::string(GRAY) + "... " + std::to_string(hidden) + " more cores" + RESET);
-                    used_rows++;
-                }
-            }
+            char cpu_pct[16];
+            snprintf(cpu_pct, sizeof(cpu_pct), "%.1f%%", snap.cpu);
+            overview_head_lines.push_back(resmon_metric_line("CPU", state.cpu_history, cols, cpu_pct, GREEN));
 
             char mem_pct[16];
             snprintf(mem_pct, sizeof(mem_pct), "%lu%%", (unsigned long)snap.memory_load);
-            std::string mem_suffix = resmon_fmt_bytes(memory_used) + GRAY + " / " + MAGENTA +
-                resmon_fmt_bytes((double)snap.memory_total) + GRAY + "  " + mem_pct;
-            std::string mem_line = resmon_metric_line("Memory", (double)snap.memory_load, cols, MAGENTA, mem_suffix);
-            resmon_draw_line(frame, mem_line);
-            used_rows++;
-
             for (size_t i = 0; i < snap.gpus.size(); i++) {
                 std::string label = "GPU " + std::to_string((int)i);
-                std::string suffix = snap.gpus[i].name + "  " + resmon_gpu_suffix(snap.gpus[i]);
-                resmon_draw_line(frame, resmon_metric_line(label, snap.gpus[i].usage_pct, cols, YELLOW, suffix));
+                char gpu_pct[16];
+                snprintf(gpu_pct, sizeof(gpu_pct), "%.1f%%", snap.gpus[i].usage_pct);
+                overview_head_lines.push_back(resmon_metric_line(label, state.gpu_history[snap.gpus[i].luid_key], cols, gpu_pct, YELLOW, YELLOW));
+                detail_lines.push_back(resmon_detail_line(label, snap.gpus[i].name + "  " + resmon_gpu_suffix(snap.gpus[i]), cols));
+            }
+            detail_lines.push_back(resmon_detail_line("Battery", resmon_power_text(snap), cols, YELLOW));
+
+            if (snap.nets.empty()) {
+                detail_lines.push_back(resmon_detail_line("Network", "No active adapters", cols, GRAY));
+            } else {
+                for (int i = 0; i < (int)snap.nets.size(); i++) {
+                    overview_tail_lines.push_back(resmon_network_line(snap.nets[i], state.net_history[snap.nets[i].name], cols, i));
+                    std::string detail = snap.nets[i].name + "  RX " + resmon_fmt_rate(snap.nets[i].rx_bytes_per_sec) +
+                        "  TX " + resmon_fmt_rate(snap.nets[i].tx_bytes_per_sec);
+                    if (snap.nets[i].link_bits_per_sec > 0)
+                        detail += "  Link " + resmon_fmt_link(snap.nets[i].link_bits_per_sec);
+                    detail_lines.push_back(resmon_detail_line("Net " + std::to_string(i), detail, cols, RESMON_CYAN));
+                }
+            }
+
+            overview_tail_lines.push_back(resmon_metric_line("Memory", state.memory_history, cols, mem_pct, MAGENTA));
+            overview_tail_lines.push_back(resmon_battery_line(snap, state.battery_history, cols));
+            detail_lines.push_back(resmon_detail_line("Uptime", resmon_fmt_uptime(snap.uptime_ms), cols, GREEN));
+
+            for (size_t i = 0; i < snap.core_cpu.size(); i++)
+                core_lines.push_back(resmon_core_line((int)i, state.core_history[i], snap.core_cpu[i], cols));
+
+            int detail_rows = std::min((int)detail_lines.size(), std::max(2, rows / 3));
+            int overview_rows = rows - used_rows - 1 - detail_rows;
+            while (overview_rows < 1 && detail_rows > 0) {
+                detail_rows--;
+                overview_rows = rows - used_rows - 1 - detail_rows;
+            }
+            if (overview_rows < 1) overview_rows = 1;
+
+            int tail_rows = std::min((int)overview_tail_lines.size(), overview_rows);
+            int head_rows = overview_rows - tail_rows;
+
+            int shown_overview = 0;
+            for (const auto& line : overview_head_lines) {
+                if (shown_overview >= head_rows) break;
+                resmon_draw_line(frame, line);
+                shown_overview++;
                 used_rows++;
             }
 
-            resmon_draw_line(frame, resmon_battery_line(snap, cols));
-            used_rows++;
-
-            resmon_draw_line(frame, sep);
-            used_rows++;
-
-            resmon_draw_line(frame, "  " + std::string(GRAY) + "Network" + RESET);
-            used_rows++;
-            int net_rows = rows - used_rows - 2;
-            if (net_rows < 1) net_rows = 1;
-            if (snap.nets.empty()) {
-                resmon_draw_line(frame, "    " + std::string(GRAY) + "No active adapters" + RESET);
-                net_rows--;
-            } else {
-                for (int i = 0; i < (int)snap.nets.size() && i < net_rows; i++) {
-                    resmon_draw_line(frame, resmon_network_line(snap.nets[i], cols));
-                }
-                net_rows -= std::min((int)snap.nets.size(), net_rows);
+            int remaining_overview = head_rows - shown_overview;
+            int shown_cores = std::min((int)core_lines.size(), remaining_overview);
+            for (int i = 0; i < shown_cores; i++) {
+                resmon_draw_line(frame, core_lines[i]);
+                used_rows++;
+            }
+            shown_overview += shown_cores;
+            if (shown_cores < (int)core_lines.size() && shown_overview < head_rows) {
+                int hidden = (int)core_lines.size() - shown_cores;
+                resmon_draw_line(frame, "  " + std::string(GRAY) + "... " + std::to_string(hidden) + " more cores" + RESET);
+                used_rows++;
+                shown_overview++;
             }
 
-            while (net_rows-- > 0)
+            while (shown_overview < head_rows) {
                 resmon_draw_line(frame, "");
+                used_rows++;
+                shown_overview++;
+            }
+
+            for (int i = 0; i < tail_rows; i++) {
+                resmon_draw_line(frame, overview_tail_lines[i]);
+                used_rows++;
+            }
 
             resmon_draw_line(frame, sep);
-            resmon_draw_line(frame, "  " + std::string(GRAY) + "Uptime  " + GREEN + resmon_fmt_uptime(snap.uptime_ms) + RESET);
+            used_rows++;
+
+            for (int i = 0; i < detail_rows; i++) {
+                resmon_draw_line(frame, detail_lines[i]);
+                used_rows++;
+            }
+
+            while (used_rows < rows)
+                resmon_draw_line(frame, "");
 
             out(frame);
             prev_cols = cols;
