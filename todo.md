@@ -29,3 +29,5 @@
 # multiline history entry hinting should we do it? did we intentionally disabled it idk
 
 # vid tool is slow
+
+# cd d: does not work, I need that as an exception if see : at the end of path we should mean that it is :/

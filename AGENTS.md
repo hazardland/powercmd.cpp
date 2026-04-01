@@ -3,6 +3,7 @@
 ## Git
 - Never commit directly to `master`; use a branch for work.
 - Only commit when explicitly asked by the user.
+- When the user asks for a commit, stage and commit everything currently shown by `git status` unless the user says otherwise.
 - Never delete files without permission.
 
 ## Project Boundaries
