@@ -34,6 +34,7 @@ struct Panel {
     int                scroll = 0;
     std::set<std::wstring> selected;
     int                sort_mode = 0;
+    bool               drive_mode = false;
     bool               active = false;
 };
 
@@ -59,6 +60,7 @@ enum EXPLORER_DIALOG_KIND {
     EXPLORER_DIALOG_RECYCLE,
     EXPLORER_DIALOG_DELETE,
     EXPLORER_DIALOG_OVERWRITE,
+    EXPLORER_DIALOG_CANCEL_OP,
     EXPLORER_DIALOG_INFO,
     EXPLORER_DIALOG_PROGRESS,
 };
@@ -84,6 +86,7 @@ struct ExploreCopyTask {
 
 struct ExploreCopyState {
     bool                     active         = false;
+    bool                     paused         = false;
     bool                     move_mode      = false;
     bool                     overwrite_all  = false;
     bool                     overwrite_once = false;
@@ -91,11 +94,17 @@ struct ExploreCopyState {
     std::vector<std::wstring> sources;
     std::vector<ExploreCopyTask> tasks;
     std::map<std::wstring, size_t> pending;
+    uint64_t                 total_bytes    = 0;
+    uint64_t                 done_bytes     = 0;
+    uint64_t                 current_bytes  = 0;
+    uint64_t                 current_total  = 0;
+    ULONGLONG                progress_tick  = 0;
     size_t                   index          = 0;
 };
 
 struct ExploreDeleteState {
     bool                     active        = false;
+    bool                     paused        = false;
     bool                     recycle_mode  = true;
     bool                     source_left   = true;
     std::vector<std::wstring> sources;
@@ -178,11 +187,11 @@ static ExploreState g_explore;
 
 static const char* EXPLORE_VT_DEFAULT = "\x1b[49m\x1b[39m";
 static const char* EXPLORE_VT_BLUE = "\x1b[49m\x1b[38;5;75m";
-static const char* EXPLORE_VT_GRAY = "\x1b[49m\x1b[38;5;240m";
+static const char* EXPLORE_VT_GRAY = "\x1b[49m" GRAY;
 static const char* EXPLORE_VT_FILE = "\x1b[49m\x1b[38;5;250m";
 static const char* EXPLORE_VT_YELLOW = "\x1b[49m\x1b[38;5;229m";
 static const char* EXPLORE_VT_BRIGHT_YELLOW = "\x1b[49m\x1b[38;5;226m";
-static const char* EXPLORE_VT_GREEN = "\x1b[49m\x1b[38;5;77m";
+static const char* EXPLORE_VT_GREEN = "\x1b[49m" GREEN;
 static const char* EXPLORE_VT_RED = "\x1b[49m\x1b[38;5;210m";
 static const char* EXPLORE_VT_MAGENTA = "\x1b[49m\x1b[1;35m";
 static const char* EXPLORE_VT_MEDIA = "\x1b[49m\x1b[38;5;51m";
@@ -218,6 +227,7 @@ static bool explore_panel_has_filter_row(const Panel& panel);
 static bool explore_any_filter_row();
 static int explore_separator_y();
 static int explore_entries_y();
+static void explore_draw();
 static void explore_jump_clear();
 static void explore_sync_panels_from_shell();
 static void explore_focus_entry_name(Panel& panel, const std::wstring& name);
@@ -228,10 +238,20 @@ static bool explore_copy_build_tasks(const std::vector<std::wstring>& sources, c
     std::vector<ExploreCopyTask>& tasks, std::map<std::wstring, size_t>& pending, std::wstring& error);
 static bool explore_move_build_tasks(const std::vector<std::wstring>& sources, const std::wstring& raw_dest,
     std::vector<ExploreCopyTask>& tasks, std::map<std::wstring, size_t>& pending, std::wstring& error);
+static std::wstring explore_transfer_name();
+static std::wstring explore_delete_name();
 static void explore_copy_run();
 static void explore_copy_cancel();
 static void explore_delete_run();
+static void explore_delete_cancel();
 static void explore_copy_refresh_panels();
+static bool explore_operation_active();
+static bool explore_operation_has_pending_work();
+static void explore_operation_cancel_dialog_open();
+static void explore_operation_resume();
+static bool explore_operation_pump();
+static void explore_copy_show_progress();
+static uint64_t explore_tasks_total_bytes(const std::vector<ExploreCopyTask>& tasks);
 
 static const ULONGLONG EXPLORER_JUMP_TIMEOUT_MS = 1000;
 
@@ -441,6 +461,89 @@ static std::wstring explore_last_error_text(DWORD code) {
     return out;
 }
 
+static uint64_t explore_file_size(const std::wstring& path) {
+    WIN32_FILE_ATTRIBUTE_DATA data = {};
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &data))
+        return 0;
+    if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)
+        return 0;
+    return ((uint64_t)data.nFileSizeHigh << 32) | data.nFileSizeLow;
+}
+
+static std::wstring explore_format_bytes(uint64_t bytes) {
+    const wchar_t* units[] = { L"B", L"KB", L"MB", L"GB", L"TB" };
+    double value = (double)bytes;
+    int unit = 0;
+    while (value >= 1024.0 && unit < 4) {
+        value /= 1024.0;
+        unit++;
+    }
+
+    wchar_t buf[64] = {};
+    if (unit == 0)
+        swprintf(buf, 64, L"%.0f %ls", value, units[unit]);
+    else
+        swprintf(buf, 64, L"%.1f %ls", value, units[unit]);
+    return buf;
+}
+
+static std::wstring explore_copy_progress_footer() {
+    if (g_explore.copy.total_bytes > 0) {
+        uint64_t current = g_explore.copy.done_bytes + std::min(g_explore.copy.current_bytes, g_explore.copy.current_total);
+        return explore_format_bytes(current) + L" / " + explore_format_bytes(g_explore.copy.total_bytes);
+    }
+    return std::to_wstring(std::min(g_explore.copy.index, g_explore.copy.tasks.size())) + L" / " +
+        std::to_wstring(g_explore.copy.tasks.size()) + L" items";
+}
+
+static DWORD CALLBACK explore_transfer_progress(LARGE_INTEGER total_file_size, LARGE_INTEGER total_bytes_transferred,
+    LARGE_INTEGER, LARGE_INTEGER, DWORD, DWORD, HANDLE, HANDLE, LPVOID) {
+    if (!g_explore.copy.active)
+        return PROGRESS_CONTINUE;
+
+    g_explore.copy.current_total = total_file_size.QuadPart >= 0 ? (uint64_t)total_file_size.QuadPart : 0;
+    g_explore.copy.current_bytes = total_bytes_transferred.QuadPart >= 0 ? (uint64_t)total_bytes_transferred.QuadPart : 0;
+
+    ULONGLONG now = GetTickCount64();
+    if (now - g_explore.copy.progress_tick >= 50 || g_explore.copy.current_bytes >= g_explore.copy.current_total) {
+        g_explore.copy.progress_tick = now;
+        explore_copy_show_progress();
+        explore_draw();
+    }
+    return PROGRESS_CONTINUE;
+}
+
+static bool explore_copy_file_with_progress(const std::wstring& src, const std::wstring& dst, bool overwrite) {
+    if (overwrite) {
+        DWORD attrs = explore_path_attrs(dst);
+        if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)))
+            SetFileAttributesW(dst.c_str(), attrs & ~(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM));
+        if (explore_path_exists(dst) && !DeleteFileW(dst.c_str()))
+            return false;
+    }
+    return CopyFileExW(src.c_str(), dst.c_str(), explore_transfer_progress, NULL, NULL, 0) != 0;
+}
+
+static bool explore_move_file_with_progress(const std::wstring& src, const std::wstring& dst, bool overwrite) {
+    DWORD flags = MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH;
+    if (overwrite)
+        flags |= MOVEFILE_REPLACE_EXISTING;
+
+    if (MoveFileWithProgressW(src.c_str(), dst.c_str(), explore_transfer_progress, NULL, flags))
+        return true;
+
+    if (!overwrite)
+        return false;
+
+    DWORD attrs = explore_path_attrs(dst);
+    if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)))
+        SetFileAttributesW(dst.c_str(), attrs & ~(FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM));
+    if (explore_path_exists(dst) && !DeleteFileW(dst.c_str()))
+        return false;
+    return MoveFileWithProgressW(src.c_str(), dst.c_str(), explore_transfer_progress, NULL,
+        MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH) != 0;
+}
+
 static bool explore_replace_file(const std::wstring& src, const std::wstring& dst) {
     DWORD attrs = explore_path_attrs(dst);
     if (attrs != INVALID_FILE_ATTRIBUTES && (attrs & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM))) {
@@ -504,7 +607,53 @@ static bool explore_glob_match(const std::wstring& text, const std::wstring& pat
 }
 
 static std::wstring explore_entry_key(const Panel& panel, const Entry& entry) {
+    if (panel.drive_mode)
+        return entry.name + L"\\";
     return explore_join_path(panel.cwd, entry.name);
+}
+
+static bool explore_panel_has_parent_row(const Panel& panel) {
+    return !panel.drive_mode;
+}
+
+static int explore_first_entry_cursor(const Panel& panel) {
+    return explore_panel_has_parent_row(panel) ? 1 : 0;
+}
+
+static int explore_entry_index_from_cursor(const Panel& panel) {
+    return panel.cursor - explore_first_entry_cursor(panel);
+}
+
+static int explore_cursor_from_entry_index(const Panel& panel, int entry_index) {
+    return explore_first_entry_cursor(panel) + entry_index;
+}
+
+static std::wstring explore_drive_name(const std::wstring& path) {
+    if (path.size() < 2 || !iswalpha(path[0]) || path[1] != L':')
+        return L"";
+    wchar_t letter = (wchar_t)::towupper(path[0]);
+    return std::wstring(1, letter) + L":";
+}
+
+static void explore_load_drives(Panel& panel) {
+    DWORD drives = GetLogicalDrives();
+    for (int i = 0; i < 26; i++) {
+        if ((drives & (1u << i)) == 0)
+            continue;
+
+        wchar_t root[4] = { (wchar_t)(L'A' + i), L':', L'\\', 0 };
+        if (GetDriveTypeW(root) == DRIVE_NO_ROOT_DIR)
+            continue;
+
+        Entry entry = {};
+        entry.name = std::wstring(root, root + 2);
+        entry.is_dir = true;
+        panel.all_entries.push_back(entry);
+    }
+}
+
+static bool explore_any_drive_mode() {
+    return g_explore.left.drive_mode || g_explore.right.drive_mode;
 }
 
 static std::wstring explore_sort_mode_label(int sort_mode) {
@@ -564,33 +713,37 @@ static void explore_load_entries(Panel& panel, bool reset_cursor, bool clear_sel
     if (clear_selection)
         panel.selected.clear();
 
-    WIN32_FIND_DATAW fd = {};
-    HANDLE h = FindFirstFileW(explore_glob_pattern(panel.cwd).c_str(), &fd);
-    if (h != INVALID_HANDLE_VALUE) {
-        std::vector<Entry> dirs;
-        std::vector<Entry> files;
-        do {
-            std::wstring name = fd.cFileName;
-            if (name == L"." || name == L"..") continue;
+    if (panel.drive_mode) {
+        explore_load_drives(panel);
+    } else {
+        WIN32_FIND_DATAW fd = {};
+        HANDLE h = FindFirstFileW(explore_glob_pattern(panel.cwd).c_str(), &fd);
+        if (h != INVALID_HANDLE_VALUE) {
+            std::vector<Entry> dirs;
+            std::vector<Entry> files;
+            do {
+                std::wstring name = fd.cFileName;
+                if (name == L"." || name == L"..") continue;
 
-            bool is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-            bool hidden = (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0 ||
-                          (!name.empty() && name[0] == L'.');
-            uint64_t size = is_dir ? 0 : (((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow);
-            Entry entry = {name, is_dir, hidden, size, fd.ftLastWriteTime};
-            (is_dir ? dirs : files).push_back(entry);
-        } while (FindNextFileW(h, &fd));
-        FindClose(h);
+                bool is_dir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+                bool hidden = (fd.dwFileAttributes & (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM)) != 0 ||
+                              (!name.empty() && name[0] == L'.');
+                uint64_t size = is_dir ? 0 : (((uint64_t)fd.nFileSizeHigh << 32) | fd.nFileSizeLow);
+                Entry entry = {name, is_dir, hidden, size, fd.ftLastWriteTime};
+                (is_dir ? dirs : files).push_back(entry);
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
 
-        auto cmp = [&](const Entry& a, const Entry& b) {
-            return explore_entry_less(a, b, panel.sort_mode);
-        };
-        std::sort(dirs.begin(), dirs.end(), cmp);
-        std::sort(files.begin(), files.end(), cmp);
+            auto cmp = [&](const Entry& a, const Entry& b) {
+                return explore_entry_less(a, b, panel.sort_mode);
+            };
+            std::sort(dirs.begin(), dirs.end(), cmp);
+            std::sort(files.begin(), files.end(), cmp);
 
-        panel.all_entries.reserve(dirs.size() + files.size());
-        panel.all_entries.insert(panel.all_entries.end(), dirs.begin(), dirs.end());
-        panel.all_entries.insert(panel.all_entries.end(), files.begin(), files.end());
+            panel.all_entries.reserve(dirs.size() + files.size());
+            panel.all_entries.insert(panel.all_entries.end(), dirs.begin(), dirs.end());
+            panel.all_entries.insert(panel.all_entries.end(), files.begin(), files.end());
+        }
     }
 
     if (!clear_selection) {
@@ -625,7 +778,7 @@ static WORD explore_entry_color(const Entry& e) {
 }
 
 static int explore_total_rows(const Panel& panel) {
-    return 1 + (int)panel.entries.size(); // ".." + entries
+    return (explore_panel_has_parent_row(panel) ? 1 : 0) + (int)panel.entries.size();
 }
 
 static bool explore_panel_has_filter_row(const Panel& panel) {
@@ -768,6 +921,7 @@ static void explore_draw_panel(std::vector<wchar_t>& chars, std::vector<WORD>& a
     }
 
     int visible = std::max(0, explore_visible_rows());
+    bool has_parent = explore_panel_has_parent_row(panel);
     for (int row = 0; row < visible; row++) {
         int y = explore_entries_y() + row;
         int idx = panel.scroll + row;
@@ -780,13 +934,18 @@ static void explore_draw_panel(std::vector<wchar_t>& chars, std::vector<WORD>& a
         std::wstring prefix = L"  ";
         std::wstring name;
         WORD name_attr = EXPLORER_DOTDOT;
+        int entry_idx = idx - (has_parent ? 1 : 0);
+        bool selected_entry = false;
 
-        if (idx == 0) {
+        if (has_parent && idx == 0) {
             name = L"..";
         } else {
-            const Entry& e = panel.entries[idx - 1];
+            if (entry_idx < 0 || entry_idx >= (int)panel.entries.size())
+                continue;
+            const Entry& e = panel.entries[entry_idx];
             name = e.name + (e.is_dir ? L"/" : L"");
-            name_attr = panel.selected.count(explore_entry_key(panel, e)) ? EXPLORER_SELECTED : explore_entry_color(e);
+            selected_entry = panel.selected.count(explore_entry_key(panel, e)) != 0;
+            name_attr = selected_entry ? EXPLORER_SELECTED : explore_entry_color(e);
         }
 
         int text_w = std::max(0, inner_w - 1);
@@ -797,18 +956,14 @@ static void explore_draw_panel(std::vector<wchar_t>& chars, std::vector<WORD>& a
             visible_name[name_w - 1] = L'…';
         for (int i = 0; i < prefix_w; i++) {
             WORD attr = EXPLORER_PATH;
-            if (is_cursor) {
-                bool selected_entry = idx > 0 && panel.selected.count(explore_entry_key(panel, panel.entries[idx - 1]));
+            if (is_cursor)
                 attr = selected_entry ? EXPLORER_CURSOR_SELECTED : EXPLORER_CURSOR_BG;
-            }
             explore_put(chars, attrs, width, height, inner_x + i, y, prefix[i], attr);
         }
         for (int i = 0; i < (int)visible_name.size(); i++) {
             WORD attr = name_attr;
-            if (is_cursor) {
-                bool selected_entry = idx > 0 && panel.selected.count(explore_entry_key(panel, panel.entries[idx - 1]));
+            if (is_cursor)
                 attr = selected_entry ? EXPLORER_CURSOR_SELECTED : EXPLORER_CURSOR_BG;
-            }
             explore_put(chars, attrs, width, height, inner_x + prefix_w + i, y, visible_name[i], attr);
         }
     }
@@ -1006,12 +1161,15 @@ static Panel& explore_copy_source_panel() {
 
 static std::wstring explore_copy_summary() {
     Panel& panel = explore_active_panel();
+    if (panel.drive_mode)
+        return L"From: Nothing selected";
     if (!panel.selected.empty())
         return L"From: " + std::to_wstring(panel.selected.size()) + L" selected";
-    if (panel.cursor <= 0 || panel.cursor - 1 >= (int)panel.entries.size())
+    int entry_idx = explore_entry_index_from_cursor(panel);
+    if (entry_idx < 0 || entry_idx >= (int)panel.entries.size())
         return L"From: Nothing selected";
 
-    const Entry& entry = panel.entries[panel.cursor - 1];
+    const Entry& entry = panel.entries[entry_idx];
     return L"From: " + entry.name + (entry.is_dir ? L"/" : L"");
 }
 
@@ -1071,6 +1229,7 @@ static void explore_open_other_same_dir() {
     Panel& active = explore_active_panel();
     Panel& inactive = explore_inactive_panel();
     inactive.cwd = active.cwd;
+    inactive.drive_mode = active.drive_mode;
     inactive.filter.clear();
     inactive.filter_cursor = 0;
     explore_load_entries(inactive, true);
@@ -1079,10 +1238,13 @@ static void explore_open_other_same_dir() {
 static void explore_cycle_sort_mode() {
     explore_jump_clear();
     Panel& panel = explore_active_panel();
+    if (panel.drive_mode)
+        return;
     std::wstring focus_name;
-    bool focus_entry = panel.cursor > 0 && panel.cursor - 1 < (int)panel.entries.size();
+    int entry_idx = explore_entry_index_from_cursor(panel);
+    bool focus_entry = entry_idx >= 0 && entry_idx < (int)panel.entries.size();
     if (focus_entry)
-        focus_name = panel.entries[panel.cursor - 1].name;
+        focus_name = panel.entries[entry_idx].name;
 
     panel.sort_mode = (panel.sort_mode + 1) % EXPLORER_SORT_COUNT;
     explore_load_entries(panel, false, false);
@@ -1094,10 +1256,13 @@ static void explore_cycle_sort_mode() {
 
 static bool explore_open_current_file(bool readonly) {
     Panel& panel = explore_active_panel();
-    if (panel.cursor <= 0 || panel.cursor - 1 >= (int)panel.entries.size())
+    if (panel.drive_mode)
+        return false;
+    int entry_idx = explore_entry_index_from_cursor(panel);
+    if (entry_idx < 0 || entry_idx >= (int)panel.entries.size())
         return false;
 
-    const Entry& entry = panel.entries[panel.cursor - 1];
+    const Entry& entry = panel.entries[entry_idx];
     if (entry.is_dir)
         return false;
 
@@ -1165,9 +1330,44 @@ static void explore_overwrite_dialog_open(const std::wstring& dst) {
         dialog_palette_warning());
 }
 
-static void explore_progress_dialog_open(const std::wstring& title, const std::wstring& summary, const std::wstring& detail, int current, int total) {
+static void explore_progress_dialog_open(const std::wstring& title, const std::wstring& summary, const std::wstring& detail,
+    uint64_t current, uint64_t total, const std::wstring& footer = L"Working...") {
     explore_dialog_begin(EXPLORER_DIALOG_PROGRESS);
-    dialog_open_progress(g_explore.dialog, title, summary, detail, current, total);
+    dialog_open_progress(g_explore.dialog, title, summary, detail, current, total, footer);
+}
+
+static bool explore_operation_active() {
+    return g_explore.copy.active || g_explore.del.active;
+}
+
+static bool explore_operation_has_pending_work() {
+    if (g_explore.copy.active)
+        return g_explore.copy.index < g_explore.copy.tasks.size();
+    if (g_explore.del.active)
+        return g_explore.del.index < g_explore.del.sources.size();
+    return false;
+}
+
+static void explore_operation_cancel_dialog_open() {
+    if (g_explore.copy.active)
+        g_explore.copy.paused = true;
+    if (g_explore.del.active)
+        g_explore.del.paused = true;
+
+    std::wstring name = L"Operation";
+    if (g_explore.copy.active)
+        name = explore_transfer_name();
+    else if (g_explore.del.active)
+        name = explore_delete_name();
+
+    explore_dialog_open_message(EXPLORER_DIALOG_CANCEL_OP, L"Cancel " + name,
+        L"Do you really want to cancel?",
+        L"Choose No to resume from the last completed item.",
+        {
+            dialog_button(EXPLORER_DIALOG_BUTTON_OK, L"ENTER", L"Yes", DIALOG_BUTTON_CAUTION, VK_RETURN),
+            dialog_button(EXPLORER_DIALOG_BUTTON_CANCEL, L"ESC", L"No", DIALOG_BUTTON_CANCEL, VK_ESCAPE),
+        },
+        dialog_palette_warning());
 }
 
 static void explore_dialog_close() {
@@ -1177,7 +1377,31 @@ static void explore_dialog_close() {
     explore_invalidate_render();
 }
 
+static void explore_operation_resume() {
+    bool resume_copy = g_explore.copy.active;
+    bool resume_delete = g_explore.del.active;
+    if (resume_copy)
+        g_explore.copy.paused = false;
+    if (resume_delete)
+        g_explore.del.paused = false;
+
+    explore_dialog_close();
+
+    if (resume_copy)
+        explore_copy_run();
+    else if (resume_delete)
+        explore_delete_run();
+}
+
 static void explore_dialog_cancel() {
+    if (g_explore.dialog_kind == EXPLORER_DIALOG_CANCEL_OP) {
+        explore_operation_resume();
+        return;
+    }
+    if (g_explore.dialog_kind == EXPLORER_DIALOG_OVERWRITE && explore_operation_active()) {
+        explore_operation_cancel_dialog_open();
+        return;
+    }
     if (g_explore.dialog_kind == EXPLORER_DIALOG_OVERWRITE)
         explore_copy_cancel();
     explore_dialog_close();
@@ -1229,6 +1453,7 @@ static void explore_dialog_confirm(int button_id) {
         g_explore.copy.active = true;
         g_explore.copy.source_left = g_explore.left.active;
         g_explore.copy.sources = sources;
+        g_explore.copy.total_bytes = explore_tasks_total_bytes(tasks);
         g_explore.copy.tasks = std::move(tasks);
         g_explore.copy.pending = std::move(pending);
         explore_copy_run();
@@ -1251,6 +1476,7 @@ static void explore_dialog_confirm(int button_id) {
         g_explore.copy.move_mode = true;
         g_explore.copy.source_left = g_explore.left.active;
         g_explore.copy.sources = sources;
+        g_explore.copy.total_bytes = explore_tasks_total_bytes(tasks);
         g_explore.copy.tasks = std::move(tasks);
         g_explore.copy.pending = std::move(pending);
         explore_copy_run();
@@ -1264,6 +1490,14 @@ static void explore_dialog_confirm(int button_id) {
             g_explore.copy.overwrite_once = true;
         explore_dialog_close();
         explore_copy_run();
+        return;
+    }
+
+    if (g_explore.dialog_kind == EXPLORER_DIALOG_CANCEL_OP) {
+        if (g_explore.copy.active)
+            explore_copy_cancel();
+        else if (g_explore.del.active)
+            explore_delete_cancel();
         return;
     }
 
@@ -1290,11 +1524,21 @@ static void explore_dialog_confirm(int button_id) {
 
 static std::vector<std::wstring> explore_copy_sources() {
     Panel& panel = explore_active_panel();
+    if (panel.drive_mode)
+        return {};
     if (!panel.selected.empty())
         return std::vector<std::wstring>(panel.selected.begin(), panel.selected.end());
-    if (panel.cursor <= 0 || panel.cursor - 1 >= (int)panel.entries.size())
+    int entry_idx = explore_entry_index_from_cursor(panel);
+    if (entry_idx < 0 || entry_idx >= (int)panel.entries.size())
         return {};
-    return {explore_entry_key(panel, panel.entries[panel.cursor - 1])};
+    return {explore_entry_key(panel, panel.entries[entry_idx])};
+}
+
+static std::wstring explore_resolve_transfer_dest(const std::vector<std::wstring>& sources, const std::wstring& raw_dest) {
+    std::wstring dest = explore_native_path(explore_trim(raw_dest));
+    if (dest.empty() || sources.empty() || explore_is_absolute_path(dest))
+        return dest;
+    return explore_join_path(explore_parent_dir(sources[0]), dest);
 }
 
 static void explore_copy_add_tasks(const std::wstring& src, const std::wstring& dst, const std::wstring& source_key,
@@ -1330,7 +1574,7 @@ static bool explore_copy_build_tasks(const std::vector<std::wstring>& sources, c
         return false;
     }
 
-    std::wstring dest = explore_native_path(raw_dest);
+    std::wstring dest = explore_resolve_transfer_dest(sources, raw_dest);
     if (dest.empty()) {
         error = L"Destination is empty";
         return false;
@@ -1414,7 +1658,7 @@ static bool explore_move_build_tasks(const std::vector<std::wstring>& sources, c
         return false;
     }
 
-    std::wstring dest = explore_native_path(raw_dest);
+    std::wstring dest = explore_resolve_transfer_dest(sources, raw_dest);
     if (dest.empty()) {
         error = L"Destination is empty";
         return false;
@@ -1467,6 +1711,16 @@ static bool explore_move_build_tasks(const std::vector<std::wstring>& sources, c
 
     explore_move_add_tasks(src, resolved, src, tasks, pending);
     return true;
+}
+
+static uint64_t explore_tasks_total_bytes(const std::vector<ExploreCopyTask>& tasks) {
+    uint64_t total = 0;
+    for (const ExploreCopyTask& task : tasks) {
+        if (task.kind != EXPLORER_COPY_TASK_FILE)
+            continue;
+        total += explore_file_size(task.src);
+    }
+    return total;
 }
 
 static void explore_copy_refresh_panels() {
@@ -1535,6 +1789,26 @@ static std::wstring explore_transfer_name() {
     return g_explore.copy.move_mode ? L"Move" : L"Copy";
 }
 
+static void explore_copy_show_progress() {
+    if (!g_explore.copy.active || g_explore.copy.paused || g_explore.copy.index >= g_explore.copy.tasks.size())
+        return;
+
+    const ExploreCopyTask& task = g_explore.copy.tasks[g_explore.copy.index];
+    uint64_t current = g_explore.copy.total_bytes > 0
+        ? g_explore.copy.done_bytes + std::min(g_explore.copy.current_bytes, g_explore.copy.current_total)
+        : (uint64_t)std::min(g_explore.copy.index, g_explore.copy.tasks.size());
+    uint64_t total = g_explore.copy.total_bytes > 0
+        ? g_explore.copy.total_bytes
+        : (uint64_t)explore_copy_total_steps();
+    explore_progress_dialog_open(
+        explore_transfer_name() + L"ing",
+        L"From: " + explore_display_path(task.source_key),
+        L"To: " + explore_display_path(task.dst),
+        current,
+        total,
+        explore_copy_progress_footer());
+}
+
 static void explore_copy_finish() {
     Panel& source = explore_copy_source_panel();
     for (const std::wstring& src : g_explore.copy.sources)
@@ -1546,91 +1820,36 @@ static void explore_copy_finish() {
 }
 
 static void explore_copy_cancel() {
-    if (g_explore.dialog_kind == EXPLORER_DIALOG_PROGRESS)
+    if (g_explore.dialog_kind != EXPLORER_DIALOG_NONE)
         explore_dialog_close();
     g_explore.copy = ExploreCopyState();
+    explore_copy_refresh_panels();
 }
 
 static void explore_copy_run() {
-    while (g_explore.copy.active && g_explore.copy.index < g_explore.copy.tasks.size()) {
-        const ExploreCopyTask& task = g_explore.copy.tasks[g_explore.copy.index];
-        explore_progress_dialog_open(
-            explore_transfer_name() + L"ing",
-            L"From: " + explore_display_path(task.source_key),
-            L"To: " + explore_display_path(task.dst),
-            (int)g_explore.copy.index,
-            explore_copy_total_steps());
-        explore_draw();
+    g_explore.copy.paused = false;
+    g_explore.copy.progress_tick = 0;
+    explore_copy_show_progress();
+}
 
-        if (task.kind == EXPLORER_COPY_TASK_MKDIR) {
-            if (!explore_ensure_dir(task.dst)) {
-                DWORD code = GetLastError();
-                explore_copy_cancel();
-                explore_info_dialog_open(explore_transfer_name(), L"Failed to create folder", explore_last_error_text(code));
-                return;
-            }
-            g_explore.copy.overwrite_once = false;
-            auto it = g_explore.copy.pending.find(task.source_key);
-            if (it != g_explore.copy.pending.end()) {
-                if (it->second > 0) it->second--;
-                if (it->second == 0) {
-                    explore_copy_source_panel().selected.erase(task.source_key);
-                    g_explore.copy.pending.erase(it);
-                }
-            }
-            g_explore.copy.index++;
-            continue;
-        }
+static bool explore_copy_step() {
+    if (!g_explore.copy.active || g_explore.copy.paused)
+        return false;
+    if (g_explore.copy.index >= g_explore.copy.tasks.size()) {
+        explore_copy_finish();
+        return true;
+    }
 
-        if (task.kind == EXPLORER_COPY_TASK_RMDIR) {
-            if (!RemoveDirectoryW(task.src.c_str())) {
-                DWORD code = GetLastError();
-                if (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND) {
-                    explore_copy_cancel();
-                    explore_info_dialog_open(explore_transfer_name(), L"Failed to remove source folder", explore_last_error_text(code));
-                    return;
-                }
-            }
-            g_explore.copy.overwrite_once = false;
-            auto it = g_explore.copy.pending.find(task.source_key);
-            if (it != g_explore.copy.pending.end()) {
-                if (it->second > 0) it->second--;
-                if (it->second == 0) {
-                    explore_copy_source_panel().selected.erase(task.source_key);
-                    g_explore.copy.pending.erase(it);
-                }
-            }
-            g_explore.copy.index++;
-            continue;
-        }
+    const ExploreCopyTask& task = g_explore.copy.tasks[g_explore.copy.index];
+    explore_copy_show_progress();
 
-        std::wstring parent = explore_parent_dir(task.dst);
-        if (!parent.empty() && !explore_ensure_dir(parent)) {
+    if (task.kind == EXPLORER_COPY_TASK_MKDIR) {
+        if (!explore_ensure_dir(task.dst)) {
             DWORD code = GetLastError();
             explore_copy_cancel();
-            explore_info_dialog_open(explore_transfer_name(), L"Failed to create target folder", explore_last_error_text(code));
-            return;
+            explore_info_dialog_open(explore_transfer_name(), L"Failed to create folder", explore_last_error_text(code));
+            return true;
         }
-
-        bool exists = explore_path_exists(task.dst);
-        if (exists && !g_explore.copy.overwrite_all && !g_explore.copy.overwrite_once) {
-            explore_overwrite_dialog_open(task.dst);
-            return;
-        }
-
-        bool overwrite = exists && (g_explore.copy.overwrite_all || g_explore.copy.overwrite_once);
-        bool ok = g_explore.copy.move_mode
-            ? explore_move_file(task.src, task.dst, overwrite)
-            : (overwrite
-                ? explore_replace_file(task.src, task.dst)
-                : (CopyFileW(task.src.c_str(), task.dst.c_str(), TRUE) != 0));
-        if (!ok) {
-            DWORD code = GetLastError();
-            explore_copy_cancel();
-            explore_info_dialog_open(explore_transfer_name(), explore_transfer_name() + L" failed", explore_last_error_text(code));
-            return;
-        }
-
         g_explore.copy.overwrite_once = false;
         auto it = g_explore.copy.pending.find(task.source_key);
         if (it != g_explore.copy.pending.end()) {
@@ -1641,14 +1860,99 @@ static void explore_copy_run() {
             }
         }
         g_explore.copy.index++;
+        if (g_explore.copy.index >= g_explore.copy.tasks.size()) {
+            explore_copy_finish();
+            return true;
+        }
+        return true;
     }
 
-    if (g_explore.copy.active && g_explore.copy.index >= g_explore.copy.tasks.size()) {
-        explore_progress_dialog_open(explore_transfer_name() + L" complete", L"", L"",
-            explore_copy_total_steps(), explore_copy_total_steps());
-        explore_draw();
-        explore_copy_finish();
+    if (task.kind == EXPLORER_COPY_TASK_RMDIR) {
+        if (!RemoveDirectoryW(task.src.c_str())) {
+            DWORD code = GetLastError();
+            if (code != ERROR_FILE_NOT_FOUND && code != ERROR_PATH_NOT_FOUND) {
+                explore_copy_cancel();
+                explore_info_dialog_open(explore_transfer_name(), L"Failed to remove source folder", explore_last_error_text(code));
+                return true;
+            }
+        }
+        g_explore.copy.overwrite_once = false;
+        auto it = g_explore.copy.pending.find(task.source_key);
+        if (it != g_explore.copy.pending.end()) {
+            if (it->second > 0) it->second--;
+            if (it->second == 0) {
+                explore_copy_source_panel().selected.erase(task.source_key);
+                g_explore.copy.pending.erase(it);
+            }
+        }
+        g_explore.copy.index++;
+        if (g_explore.copy.index >= g_explore.copy.tasks.size()) {
+            explore_copy_finish();
+            return true;
+        }
+        return true;
     }
+
+    std::wstring parent = explore_parent_dir(task.dst);
+    if (!parent.empty() && !explore_ensure_dir(parent)) {
+        DWORD code = GetLastError();
+        explore_copy_cancel();
+        explore_info_dialog_open(explore_transfer_name(), L"Failed to create target folder", explore_last_error_text(code));
+        return true;
+    }
+
+    bool exists = explore_path_exists(task.dst);
+    if (exists && !g_explore.copy.overwrite_all && !g_explore.copy.overwrite_once) {
+        explore_overwrite_dialog_open(task.dst);
+        return true;
+    }
+
+    bool overwrite = exists && (g_explore.copy.overwrite_all || g_explore.copy.overwrite_once);
+    uint64_t file_size = explore_file_size(task.src);
+    g_explore.copy.current_total = file_size;
+    g_explore.copy.current_bytes = 0;
+    g_explore.copy.progress_tick = 0;
+    bool ok = g_explore.copy.move_mode
+        ? explore_move_file_with_progress(task.src, task.dst, overwrite)
+        : explore_copy_file_with_progress(task.src, task.dst, overwrite);
+    if (!ok) {
+        DWORD code = GetLastError();
+        explore_copy_cancel();
+        explore_info_dialog_open(explore_transfer_name(), explore_transfer_name() + L" failed", explore_last_error_text(code));
+        return true;
+    }
+
+    g_explore.copy.done_bytes += file_size;
+    g_explore.copy.current_bytes = 0;
+    g_explore.copy.current_total = 0;
+    g_explore.copy.overwrite_once = false;
+    auto it = g_explore.copy.pending.find(task.source_key);
+    if (it != g_explore.copy.pending.end()) {
+        if (it->second > 0) it->second--;
+        if (it->second == 0) {
+            explore_copy_source_panel().selected.erase(task.source_key);
+            g_explore.copy.pending.erase(it);
+        }
+    }
+    g_explore.copy.index++;
+    if (g_explore.copy.index >= g_explore.copy.tasks.size()) {
+        explore_copy_finish();
+        return true;
+    }
+    return true;
+}
+
+static void explore_delete_show_progress() {
+    if (!g_explore.del.active || g_explore.del.paused || g_explore.del.index >= g_explore.del.sources.size())
+        return;
+
+    const std::wstring& src = g_explore.del.sources[g_explore.del.index];
+    explore_progress_dialog_open(
+        explore_delete_progress_name(),
+        L"From: " + explore_display_path(src),
+        g_explore.del.recycle_mode ? L"To: recycle bin" : L"To: permanent delete",
+        (int)g_explore.del.index,
+        explore_delete_total_steps());
 }
 
 static void explore_delete_finish() {
@@ -1659,39 +1963,52 @@ static void explore_delete_finish() {
 }
 
 static void explore_delete_cancel() {
-    if (g_explore.dialog_kind == EXPLORER_DIALOG_PROGRESS)
+    if (g_explore.dialog_kind != EXPLORER_DIALOG_NONE)
         explore_dialog_close();
     g_explore.del = ExploreDeleteState();
+    explore_copy_refresh_panels();
 }
 
 static void explore_delete_run() {
-    while (g_explore.del.active && g_explore.del.index < g_explore.del.sources.size()) {
-        const std::wstring& src = g_explore.del.sources[g_explore.del.index];
-        explore_progress_dialog_open(
-            explore_delete_progress_name(),
-            L"From: " + explore_display_path(src),
-            g_explore.del.recycle_mode ? L"To: recycle bin" : L"To: permanent delete",
-            (int)g_explore.del.index,
-            explore_delete_total_steps());
-        explore_draw();
+    g_explore.del.paused = false;
+    explore_delete_show_progress();
+}
 
-        std::wstring error;
-        if (!explore_delete_path(src, g_explore.del.recycle_mode, error)) {
-            explore_delete_cancel();
-            explore_info_dialog_open(explore_delete_name(), explore_delete_name() + L" failed", error);
-            return;
-        }
-
-        explore_delete_source_panel().selected.erase(src);
-        g_explore.del.index++;
-    }
-
-    if (g_explore.del.active && g_explore.del.index >= g_explore.del.sources.size()) {
-        explore_progress_dialog_open(explore_delete_name() + L" complete", L"", L"",
-            explore_delete_total_steps(), explore_delete_total_steps());
-        explore_draw();
+static bool explore_delete_step() {
+    if (!g_explore.del.active || g_explore.del.paused)
+        return false;
+    if (g_explore.del.index >= g_explore.del.sources.size()) {
         explore_delete_finish();
+        return true;
     }
+
+    const std::wstring& src = g_explore.del.sources[g_explore.del.index];
+    explore_delete_show_progress();
+
+    std::wstring error;
+    if (!explore_delete_path(src, g_explore.del.recycle_mode, error)) {
+        explore_delete_cancel();
+        explore_info_dialog_open(explore_delete_name(), explore_delete_name() + L" failed", error);
+        return true;
+    }
+
+    explore_delete_source_panel().selected.erase(src);
+    g_explore.del.index++;
+    if (g_explore.del.index >= g_explore.del.sources.size()) {
+        explore_delete_finish();
+        return true;
+    }
+    return true;
+}
+
+static bool explore_operation_pump() {
+    if (g_explore.dialog_kind == EXPLORER_DIALOG_OVERWRITE || g_explore.dialog_kind == EXPLORER_DIALOG_CANCEL_OP)
+        return false;
+    if (g_explore.copy.active)
+        return explore_copy_step();
+    if (g_explore.del.active)
+        return explore_delete_step();
+    return false;
 }
 
 static bool explore_jump_expired() {
@@ -1716,7 +2033,7 @@ static void explore_jump_focus_match(Panel& panel) {
     for (int i = 0; i < (int)panel.entries.size(); i++) {
         std::wstring name = explore_lower(panel.entries[i].name);
         if (name.rfind(prefix, 0) == 0) {
-            panel.cursor = i + 1;
+            panel.cursor = explore_cursor_from_entry_index(panel, i);
             explore_clamp_panel(panel);
             return;
         }
@@ -1746,6 +2063,7 @@ static void explore_sync_panels_from_shell() {
     Panel& active = explore_active_panel();
     if (active.cwd != shell_cwd) {
         active.cwd = shell_cwd;
+        active.drive_mode = false;
         explore_load_entries(active, true);
     } else {
         explore_load_entries(active, false, false);
@@ -1757,7 +2075,8 @@ static void explore_sync_panels_from_shell() {
 }
 
 static void explore_focus_filter_result(Panel& panel) {
-    if (!panel.filter.empty() && !panel.entries.empty()) panel.cursor = 1;
+    if (!panel.filter.empty() && !panel.entries.empty())
+        panel.cursor = explore_first_entry_cursor(panel);
     explore_clamp_panel(panel);
 }
 
@@ -1768,7 +2087,7 @@ static void explore_focus_entry_name(Panel& panel, const std::wstring& name) {
     }
     for (int i = 0; i < (int)panel.entries.size(); i++) {
         if (panel.entries[i].name == name) {
-            panel.cursor = i + 1;
+            panel.cursor = explore_cursor_from_entry_index(panel, i);
             explore_clamp_panel(panel);
             return;
         }
@@ -1884,9 +2203,10 @@ static void explore_move_home_end(bool home) {
 static void explore_toggle_selection() {
     explore_jump_clear();
     Panel& panel = explore_active_panel();
-    if (panel.cursor <= 0) return;
+    if (panel.drive_mode) return;
 
-    int idx = panel.cursor - 1;
+    int idx = explore_entry_index_from_cursor(panel);
+    if (idx < 0) return;
     if (idx >= (int)panel.entries.size()) return;
 
     std::wstring key = explore_entry_key(panel, panel.entries[idx]);
@@ -1910,6 +2230,19 @@ static bool explore_clear_selection() {
 static void explore_go_parent() {
     explore_jump_clear();
     Panel& panel = explore_active_panel();
+    if (panel.drive_mode) {
+        panel.drive_mode = false;
+        explore_load_entries(panel, true);
+        return;
+    }
+
+    if (explore_is_drive_root(panel.cwd)) {
+        panel.drive_mode = true;
+        explore_load_entries(panel, true);
+        explore_focus_entry_name(panel, explore_drive_name(panel.cwd));
+        return;
+    }
+
     std::wstring child_name = explore_leaf_name(panel.cwd);
     std::wstring parent = explore_parent_dir(panel.cwd);
     if (!parent.empty() && parent != panel.cwd) {
@@ -1925,15 +2258,17 @@ static void explore_go_parent() {
 static void explore_enter() {
     explore_jump_clear();
     Panel& panel = explore_active_panel();
-    if (panel.cursor == 0) {
+    if (explore_panel_has_parent_row(panel) && panel.cursor == 0) {
         explore_go_parent();
         return;
     }
-    if (panel.cursor - 1 >= (int)panel.entries.size()) return;
+    int entry_idx = explore_entry_index_from_cursor(panel);
+    if (entry_idx < 0 || entry_idx >= (int)panel.entries.size()) return;
 
-    const Entry& entry = panel.entries[panel.cursor - 1];
-    std::wstring path = explore_join_path(panel.cwd, entry.name);
+    const Entry& entry = panel.entries[entry_idx];
+    std::wstring path = explore_entry_key(panel, entry);
     if (entry.is_dir) {
+        panel.drive_mode = false;
         panel.cwd = path;
         explore_load_entries(panel, true);
     }
@@ -1954,8 +2289,14 @@ void explore_toggle() {
     explore_draw();
 
     while (true) {
-        DWORD wait = WaitForSingleObject(in_h, 50);
-        if (wait != WAIT_OBJECT_0) continue;
+        bool pump_ready = explore_operation_active() &&
+            (g_explore.dialog_kind == EXPLORER_DIALOG_NONE || g_explore.dialog_kind == EXPLORER_DIALOG_PROGRESS);
+        DWORD wait = WaitForSingleObject(in_h, pump_ready ? 1 : 50);
+        if (wait != WAIT_OBJECT_0) {
+            if (explore_operation_pump())
+                explore_draw();
+            continue;
+        }
 
         INPUT_RECORD ir;
         DWORD count = 0;
@@ -1974,7 +2315,30 @@ void explore_toggle() {
         bool ctrl = (state & (LEFT_CTRL_PRESSED | RIGHT_CTRL_PRESSED)) != 0;
         bool shift = (state & SHIFT_PRESSED) != 0;
 
-        if ((ctrl && vk == 'O') || vk == VK_F10) break;
+        if (explore_operation_active() &&
+            g_explore.dialog_kind == EXPLORER_DIALOG_PROGRESS &&
+            !explore_operation_has_pending_work()) {
+            if (explore_operation_pump())
+                explore_draw();
+            continue;
+        }
+
+        if ((ctrl && vk == 'O') || vk == VK_F10) {
+            if (explore_operation_active()) {
+                if (g_explore.dialog_kind != EXPLORER_DIALOG_CANCEL_OP)
+                    explore_operation_cancel_dialog_open();
+                explore_draw();
+                continue;
+            }
+            break;
+        }
+        if (explore_operation_active() &&
+            (g_explore.dialog_kind == EXPLORER_DIALOG_PROGRESS || g_explore.dialog_kind == EXPLORER_DIALOG_OVERWRITE) &&
+            !ctrl && vk == VK_ESCAPE) {
+            explore_operation_cancel_dialog_open();
+            explore_draw();
+            continue;
+        }
         if (explore_dialog_focused()) {
             DialogEvent event = dialog_handle_key(g_explore.dialog, vk, ch, ctrl, shift);
             if (event.kind == DIALOG_EVENT_REDRAW) {
@@ -2006,6 +2370,7 @@ void explore_toggle() {
             continue;
         }
         explore_jump_reset_if_expired();
+        bool drive_mode = explore_any_drive_mode();
         if (!ctrl && ch == L'/')         { explore_filter_begin(); explore_draw(); continue; }
         if (!ctrl && vk == VK_ESCAPE)    {
             if (explore_clear_selection() || !g_explore.jump_buffer.empty()) {
@@ -2015,7 +2380,7 @@ void explore_toggle() {
             continue;
         }
         if (vk == VK_F1)       { explore_open_other_same_dir(); explore_draw(); continue; }
-        if (vk == VK_F2)       { explore_cycle_sort_mode(); explore_draw(); continue; }
+        if (vk == VK_F2 && !drive_mode) { explore_cycle_sort_mode(); explore_draw(); continue; }
         if (vk == VK_TAB)      { explore_switch_panel(); explore_draw(); continue; }
         if (vk == VK_UP)       { explore_move_cursor(-1); explore_draw(); continue; }
         if (vk == VK_DOWN)     { explore_move_cursor(+1); explore_draw(); continue; }
@@ -2027,12 +2392,12 @@ void explore_toggle() {
         if (vk == VK_END)      { explore_move_home_end(false); explore_draw(); continue; }
         if (vk == VK_F3)       { if (explore_open_current_file(true)) explore_draw(); continue; }
         if (vk == VK_F4)       { if (explore_open_current_file(false)) explore_draw(); continue; }
-        if (vk == VK_F5)       { explore_copy_dialog_open(); explore_draw(); continue; }
-        if (vk == VK_F6)       { explore_move_dialog_open(); explore_draw(); continue; }
-        if (vk == VK_F7)       { explore_mkdir_dialog_open(); explore_draw(); continue; }
-        if (vk == VK_F8 && shift) { explore_delete_dialog_open(false); explore_draw(); continue; }
-        if (vk == VK_F8)       { explore_delete_dialog_open(true); explore_draw(); continue; }
-        if (vk == VK_INSERT)   { explore_toggle_selection(); explore_draw(); continue; }
+        if (vk == VK_F5 && !drive_mode)       { explore_copy_dialog_open(); explore_draw(); continue; }
+        if (vk == VK_F6 && !drive_mode)       { explore_move_dialog_open(); explore_draw(); continue; }
+        if (vk == VK_F7 && !drive_mode)       { explore_mkdir_dialog_open(); explore_draw(); continue; }
+        if (vk == VK_F8 && shift && !drive_mode) { explore_delete_dialog_open(false); explore_draw(); continue; }
+        if (vk == VK_F8 && !drive_mode)       { explore_delete_dialog_open(true); explore_draw(); continue; }
+        if (vk == VK_INSERT && !drive_mode)   { explore_toggle_selection(); explore_draw(); continue; }
         if (vk == VK_RETURN)   { explore_enter(); explore_draw(); continue; }
         if (!ctrl && vk == VK_BACK && !g_explore.jump_buffer.empty()) { explore_jump_backspace(); explore_draw(); continue; }
         if (vk == VK_BACK)     { explore_go_parent(); explore_draw(); continue; }

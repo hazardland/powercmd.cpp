@@ -26,13 +26,13 @@
 #define STR(x) STR_(x)
 #define VERSION "0.0." STR(VERSION_MINOR)
 
-#define GRAY   "\x1b[38;5;240m"
+#define GRAY   "\x1b[38;2;142;150;166m"
 #define BLUE   "\x1b[38;5;75m"
 #define RED    "\x1b[38;5;203m"
 #define YELLOW "\x1b[38;5;229m"
 #define BRIGHT_YELLOW "\x1b[38;5;226m"
 #define MAGENTA "\x1b[1;35m"
-#define GREEN  "\x1b[38;5;77m"
+#define GREEN  "\x1b[38;2;76;208;101m"
 #define SILVER "\x1b[38;5;250m"
 #define ARCHIVE_RED "\x1b[38;5;210m"
 #define RESET  "\x1b[0m"

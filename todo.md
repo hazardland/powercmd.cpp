@@ -1,33 +1,32 @@
-# cat *.mp4
- . This is for future but we should come up with some clever way and high performance solution to add sound to video playback
+# Todo
 
+## Media
 
-# Pipes
- . make builtin commands work with pipes with outer tools, this really makes me thinking because outside grep does not see our command output, but if we implement this, while implementing it we should not by anu means compromise performance, or accept any drowback that ruins already established comfortable experience
+- `cat *.mp4`
+  This is for future, but we should come up with some clever and high-performance solution to add sound to video playback.
 
+- `vid`
+  The `vid` tool is slow.
 
-# Explorer.h
-    . Long names should hide if no space on tab, now they are hiding but with unicode chars in filename there could be some edge case?
+## Shell
 
-    . Rename: I delete path in move i.e. not full path it means I am naming new name?
-        Should work on folder and on file
+- `Pipes`
+  Make built-in commands work with pipes with outer tools. Outside `grep` does not see our command output right now, but if we implement this we should not compromise performance or ruin the already established comfortable experience.
 
-    . Copy owerwrite dialog has partial red border it should have full red border, also identify what dialogs should have red border
+- `rm`, `cp`, `mv`
+  Standard Windows commands should be followed with autocomplete when they require a path.
 
-# Edit
-    . SQL syntax
+- External task control
+  When executing a task from the shell which opens a new window, for example `image.jpg`, `Ctrl+C` in the terminal does not kill the task or release the terminal prompt.
 
+- Multiline history hints
+  Should multiline history entry hinting work? Did we intentionally disable it?
 
-# standard windows commands rm cp mv should be followed with autocomplete also which require path
+## Explorer
 
-# view command launch editor in view mode like Explorer uses it
+- Long names
+  Long names should hide if there is no space in the tab. They are hiding now, but filenames with Unicode chars could still have edge cases.
 
-# When execute task from shell which opens new window for example I execute image.jpg, ctrl+C in the terminal does not kill the task or release terminal prompt 
+- Operation cancel/resume on mid copy or move between disks with progress functions (?)
 
-# probably we should disable ghost hint for git commit it is annoyng if command starts at git commit basically I d disable ghost hints for git because it is dangerous, in future there might be commands that also do not need ghost hints nah better idea we can hint git [command] but no further than command idk we need to choose something optimal, hinting already a performance issue and we should be careful
-
-# multiline history entry hinting should we do it? did we intentionally disabled it idk
-
-# vid tool is slow
-
-# cd d: does not work, I need that as an exception if see : at the end of path we should mean that it is :/
+# I like VSCode terminal color scheme any chance we make it permanent? Zed One Theme Dark

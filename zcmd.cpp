@@ -192,6 +192,7 @@ int main() {
                 GREEN "img" RESET "     Render image with SIXEL  img path/to/file\r\n"
                 GREEN "vid" RESET "     Play video with SIXEL  vid path/to/file  Esc/Ctrl+C to stop  requires ffmpeg\r\n"
                 GREEN "edit" RESET "    Edit a file  edit path/to/file\r\n"
+                GREEN "view" RESET "    View a file  view path/to/file\r\n"
                 GREEN "terminfo" RESET " Print terminal columns and rows\r\n"
                 GREEN "matrix" RESET "   Matrix digital rain screensaver  any key to exit\r\n"
                 GREEN "notes" RESET "    Open ~/notes.md in the editor\r\n"
@@ -243,6 +244,12 @@ int main() {
 
         if (lower == "resmon") {
             resmon_cmd();
+            last_code = 0;
+            continue;
+        }
+
+        if (lower == "explore") {
+            explore_toggle();
             last_code = 0;
             continue;
         }
@@ -350,6 +357,14 @@ int main() {
             continue;
         }
 
+        if (lower.size() >= 5 && lower.substr(0, 5) == "view ") {
+            std::string arg = line.substr(5);
+            while (!arg.empty() && arg.front() == ' ') arg.erase(arg.begin());
+            while (!arg.empty() && arg.back()  == ' ') arg.pop_back();
+            last_code = view_file(arg);
+            continue;
+        }
+
         // cat <file> | grep <word>  or  cat <file> | findstr <word>
         if (lower.size() >= 4 && lower.substr(0, 4) == "cat ") {
             std::string rest = line.substr(4);
@@ -441,6 +456,14 @@ int main() {
             if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY)) {
                 SetCurrentDirectoryW(wpath.c_str());
                 last_code = 0;
+                continue;
+            }
+        }
+
+        {
+            int detached_code = 0;
+            if (shell_try_detached_launch(line, detached_code)) {
+                last_code = detached_code;
                 continue;
             }
         }

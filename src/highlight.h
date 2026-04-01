@@ -4,7 +4,7 @@
 // Depends : common.h
 
 // Language detected from file extension; drives syntax highlight rules.
-enum class lang { none, cpp, py, js, json, md, bat, sol, php, go, rust, cs, java, sh, html, yaml };
+enum class lang { none, cpp, py, js, json, md, bat, sol, php, go, rust, cs, java, sh, html, yaml, sql };
 
 static lang detect_lang(const std::string& path) {
     size_t dot = path.rfind('.');
@@ -26,6 +26,7 @@ static lang detect_lang(const std::string& path) {
     if (ext==".sh"||ext==".bash")                                     return lang::sh;
     if (ext==".html"||ext==".htm"||ext==".xml"||ext==".svg")         return lang::html;
     if (ext==".yaml"||ext==".yml")                                    return lang::yaml;
+    if (ext==".sql")                                                  return lang::sql;
     return lang::none;
 }
 
@@ -289,6 +290,56 @@ static std::string colorize_line(const std::string& line, lang l) {
             return line.substr(0, dash) + GREEN + "-" + RESET + line.substr(dash + 1);
         }
         return line;
+    }
+    if (l == lang::sql) {
+        if (pfx.size() >= 2 && pfx.substr(0, 2) == "--") return GRAY + line + RESET;
+        static const std::vector<std::string> kw = {
+            "select","from","where","join","inner","left","right","full","outer","cross","on",
+            "group","by","order","having","limit","offset","fetch","top","distinct","as",
+            "insert","into","values","update","set","delete","truncate","merge","using",
+            "create","alter","drop","table","view","index","database","schema","trigger","procedure",
+            "function","primary","key","foreign","references","constraint","unique","check","default",
+            "null","not","and","or","in","exists","between","like","ilike","is","case","when","then",
+            "else","end","union","all","except","intersect","with","recursive","over","partition",
+            "row_number","rank","dense_rank","count","sum","avg","min","max","cast","convert",
+            "begin","commit","rollback","grant","revoke","true","false"
+        };
+        std::string res;
+        size_t i = 0, n = line.size();
+        while (i < n) {
+            if (i + 1 < n && line[i] == '-' && line[i + 1] == '-') {
+                res += GRAY + line.substr(i) + RESET;
+                break;
+            }
+            if (line[i] == '\'' || line[i] == '"') {
+                char q = line[i];
+                size_t j = i + 1;
+                while (j < n) {
+                    if (line[j] == q) {
+                        if (j + 1 < n && line[j + 1] == q) { j += 2; continue; }
+                        j++;
+                        break;
+                    }
+                    j++;
+                }
+                res += YELLOW + line.substr(i, j - i) + RESET;
+                i = j;
+                continue;
+            }
+            if (isalpha((unsigned char)line[i]) || line[i] == '_') {
+                size_t j = i;
+                while (j < n && (isalnum((unsigned char)line[j]) || line[j] == '_')) j++;
+                std::string word = line.substr(i, j - i);
+                std::string lower = word;
+                std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+                bool is_kw = std::find(kw.begin(), kw.end(), lower) != kw.end();
+                res += is_kw ? (BLUE + word + RESET) : word;
+                i = j;
+                continue;
+            }
+            res += line[i++];
+        }
+        return res;
     }
     return line;
 }

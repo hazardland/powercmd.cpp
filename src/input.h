@@ -162,6 +162,40 @@ static std::vector<std::wstring> complete_cached(input& e, const std::wstring& p
     return out;
 }
 
+static std::wstring find_git_hint(const input& e) {
+    std::wstring buf = e.buf;
+    std::wstring lower = buf;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+    if (lower != L"git" && !(lower.size() >= 4 && lower.substr(0, 4) == L"git "))
+        return L"";
+
+    std::wstring rest = (buf.size() <= 4) ? L"" : buf.substr(4);
+    if (rest.find(L' ') != std::wstring::npos || rest.find(L'\t') != std::wstring::npos)
+        return L"";
+
+    static const std::vector<std::wstring> git_commands = {
+        L"status", L"commit", L"add", L"push", L"pull", L"fetch", L"switch", L"checkout",
+        L"branch", L"merge", L"rebase", L"diff", L"log", L"restore", L"reset", L"stash",
+        L"clone", L"init", L"remote", L"show", L"tag", L"blame", L"grep", L"bisect"
+    };
+
+    std::wstring rest_lower = rest;
+    std::transform(rest_lower.begin(), rest_lower.end(), rest_lower.begin(), ::towlower);
+    for (const std::wstring& cmd : git_commands) {
+        if (!hint_starts_with_ci(cmd, rest_lower))
+            continue;
+        if (buf.size() == 3)
+            return L" " + cmd;
+        if (rest.empty())
+            return cmd;
+        if (cmd.size() > rest.size())
+            return cmd.substr(rest.size());
+        return L"";
+    }
+
+    return L"";
+}
+
 // Calculates the ghost hint for the current buf in edit mode (hist_idx == -1).
 // For "cd <path>" uses filesystem completions (dirs only); for "ls <path>" files+dirs;
 // for bare paths (X:/, ./, ../) uses filesystem completions directly;
@@ -172,6 +206,10 @@ void find_hint(input& e) {
     if (e.buf.find(L'\n') != std::wstring::npos) return; // no hint in multiline mode
     std::wstring lower = e.buf;
     std::transform(lower.begin(), lower.end(), lower.begin(), ::towlower);
+    if (lower == L"git" || (lower.size() >= 4 && lower.substr(0, 4) == L"git ")) {
+        e.hint = find_git_hint(e);
+        return;
+    }
     if (lower == L"cd" || (lower.size() >= 3 && lower.substr(0, 3) == L"cd ")) {
         if (lower.size() >= 3) {
             std::wstring token = e.buf.substr(3);
@@ -326,6 +364,17 @@ static int phys_col(const std::wstring& buf, int p, int prompt_vis, int width) {
     return col;
 }
 
+static std::wstring shown_hint(const input& e) {
+    if (e.hint.empty() || e.buf.find(L'\n') != std::wstring::npos)
+        return L"";
+    int width = term_width();
+    int end_col = phys_col(e.buf, (int)e.buf.size(), e.prompt_vis, width);
+    int remaining = width - end_col;
+    if (remaining <= 1)
+        return L"";
+    return e.hint.substr(0, std::min((int)e.hint.size(), remaining - 1));
+}
+
 // Redraws the entire input line in place: moves up to the prompt row, clears to end of screen,
 // reprints prompt + buf + gray hint, then repositions the cursor at e.pos.
 // Handles multiline buf (embedded \n) with 2-space continuation indent. Batches output to avoid flicker.
@@ -358,14 +407,10 @@ void redraw(input& e) {
         }
     }
 
-    // Gray hint — only shown in single-line mode to avoid complexity
-    if (!e.hint.empty() && e.buf.find(L'\n') == std::wstring::npos) {
-        int end_col   = phys_col(e.buf, (int)e.buf.size(), e.prompt_vis, width);
-        int remaining = width - end_col;
-        std::wstring shown = e.hint.substr(0, std::min((int)e.hint.size(), remaining - 1));
-        if (!shown.empty())
-            s += GRAY + to_utf8(shown) + RESET;
-    }
+    // Gray hint - only shown in single-line mode to avoid complexity
+    std::wstring hint = shown_hint(e);
+    if (!hint.empty())
+        s += GRAY + to_utf8(hint) + RESET;
 
     // Position cursor at e.pos
     int total_rows = phys_rows(e.buf, (int)e.buf.size(), e.prompt_vis, width);
@@ -384,6 +429,30 @@ void redraw(input& e) {
     out(s);
     e.prev_pos   = e.pos;
     e.cursor_row = pos_row;
+}
+
+static bool fast_backspace_paint(input& e, const std::wstring& old_buf) {
+    if (old_buf.find(L'\n') != std::wstring::npos || e.buf.find(L'\n') != std::wstring::npos)
+        return false;
+
+    int width = term_width();
+    if (phys_rows(old_buf, (int)old_buf.size(), e.prompt_vis, width) != 0)
+        return false;
+    if (phys_rows(e.buf, (int)e.buf.size(), e.prompt_vis, width) != 0)
+        return false;
+
+    std::wstring hint = shown_hint(e);
+    std::string s = "\b\x1b[J";
+    if (!hint.empty()) {
+        s += GRAY + to_utf8(hint) + RESET;
+        char esc[32];
+        snprintf(esc, sizeof(esc), "\x1b[%dD", (int)hint.size());
+        s += esc;
+    }
+    out(s);
+    e.prev_pos = e.pos;
+    e.cursor_row = 0;
+    return true;
 }
 
 // Inserts clipboard text at the current cursor position.
@@ -635,7 +704,8 @@ std::string readline(input& e) {
                 } else {
                     find_hint(e);
                 }
-                redraw(e);
+                if (!backspace_at_end || !fast_backspace_paint(e, old_buf))
+                    redraw(e);
             }
             continue;
         }

@@ -3,7 +3,13 @@
 // Exports : cd() ls() run() run_bash() which() rule()
 // Depends : common.h, info.h (cwd), complete.h, persist.h (prev_dir/last_session_dir)
 
+#include <shellapi.h>
+
 // Built-in cd: strips the /d flag, expands ~ to USERPROFILE, resolves - and -- shortcuts.
+static bool cd_is_drive_root(const std::string& path) {
+    return path.size() == 2 && std::isalpha((unsigned char)path[0]) && path[1] == ':';
+}
+
 void cd(const std::string& line) {
     std::string args = line.size() > 2 ? line.substr(3) : "";
     if (args.size() >= 3 && args[0] == '/' && (args[1] == 'd' || args[1] == 'D') && args[2] == ' ')
@@ -34,6 +40,9 @@ void cd(const std::string& line) {
         GetEnvironmentVariableA("USERPROFILE", home, MAX_PATH);
         args = std::string(home) + args.substr(1);
     }
+
+    if (cd_is_drive_root(args))
+        args += '/';
 
     std::string before = cwd();
     if (!SetCurrentDirectoryW(to_wide(args).c_str()))
@@ -249,6 +258,227 @@ static bool is_env_mutator(const std::string& line) {
     return env_mutators.count(tok) > 0;
 }
 
+static std::string shell_trim(std::string s) {
+    while (!s.empty() && s.front() == ' ') s.erase(s.begin());
+    while (!s.empty() && s.back() == ' ') s.pop_back();
+    return s;
+}
+
+static bool shell_split_first_token(const std::string& line, std::string& token, std::string& rest) {
+    std::string s = shell_trim(line);
+    token.clear();
+    rest.clear();
+    if (s.empty())
+        return false;
+
+    if (s[0] == '"') {
+        size_t end = s.find('"', 1);
+        if (end == std::string::npos)
+            return false;
+        token = s.substr(1, end - 1);
+        rest = shell_trim(s.substr(end + 1));
+        return true;
+    }
+
+    size_t sp = s.find(' ');
+    if (sp == std::string::npos) {
+        token = s;
+        return true;
+    }
+    token = s.substr(0, sp);
+    rest = shell_trim(s.substr(sp + 1));
+    return true;
+}
+
+static bool shell_has_meta(const std::string& text) {
+    bool in_quotes = false;
+    for (size_t i = 0; i < text.size(); i++) {
+        char c = text[i];
+        if (c == '"') {
+            in_quotes = !in_quotes;
+            continue;
+        }
+        if (in_quotes)
+            continue;
+        if (c == '|' || c == '<' || c == '>')
+            return true;
+        if ((c == '&' || c == '%') && (i == 0 || text[i - 1] != '^'))
+            return true;
+    }
+    return false;
+}
+
+static std::wstring shell_ext_lower(const std::wstring& path) {
+    size_t dot = path.rfind(L'.');
+    if (dot == std::wstring::npos)
+        return L"";
+    std::wstring ext = path.substr(dot);
+    std::transform(ext.begin(), ext.end(), ext.begin(), ::towlower);
+    return ext;
+}
+
+static bool shell_is_non_wait_open_ext(const std::wstring& ext) {
+    return ext != L".exe" && ext != L".com" && ext != L".bat" && ext != L".cmd" &&
+        ext != L".ps1" && ext != L".py" && ext != L".js" && ext != L".vbs" && ext != L".wsf";
+}
+
+static bool shell_resolve_existing_path(const std::string& token, std::wstring& path_out) {
+    std::wstring path = to_wide(normalize_path(token));
+    DWORD attr = GetFileAttributesW(path.c_str());
+    if (attr == INVALID_FILE_ATTRIBUTES)
+        return false;
+
+    wchar_t full[MAX_PATH] = {};
+    DWORD len = GetFullPathNameW(path.c_str(), MAX_PATH, full, NULL);
+    path_out = (len > 0 && len < MAX_PATH) ? std::wstring(full) : path;
+    return true;
+}
+
+static bool shell_resolve_exe_token(const std::string& token, std::wstring& path_out) {
+    std::wstring direct;
+    if (shell_resolve_existing_path(token, direct)) {
+        if (shell_ext_lower(direct) == L".exe") {
+            path_out = direct;
+            return true;
+        }
+        return false;
+    }
+
+    std::wstring wtoken = to_wide(token);
+    wchar_t found[MAX_PATH] = {};
+    DWORD len = SearchPathW(NULL, wtoken.c_str(), L".exe", MAX_PATH, found, NULL);
+    if (len == 0 || len >= MAX_PATH)
+        return false;
+    path_out = found;
+    return true;
+}
+
+static bool shell_is_gui_exe(const std::wstring& path) {
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE)
+        return false;
+
+    IMAGE_DOS_HEADER dos = {};
+    DWORD read = 0;
+    bool ok = ReadFile(h, &dos, sizeof(dos), &read, NULL) != 0 && read == sizeof(dos) && dos.e_magic == IMAGE_DOS_SIGNATURE;
+    if (!ok) {
+        CloseHandle(h);
+        return false;
+    }
+
+    if (SetFilePointer(h, dos.e_lfanew, NULL, FILE_BEGIN) == INVALID_SET_FILE_POINTER && GetLastError() != NO_ERROR) {
+        CloseHandle(h);
+        return false;
+    }
+
+    DWORD pe_sig = 0;
+    ok = ReadFile(h, &pe_sig, sizeof(pe_sig), &read, NULL) != 0 && read == sizeof(pe_sig) && pe_sig == IMAGE_NT_SIGNATURE;
+    if (!ok) {
+        CloseHandle(h);
+        return false;
+    }
+
+    IMAGE_FILE_HEADER file = {};
+    ok = ReadFile(h, &file, sizeof(file), &read, NULL) != 0 && read == sizeof(file);
+    if (!ok) {
+        CloseHandle(h);
+        return false;
+    }
+
+    WORD magic = 0;
+    ok = ReadFile(h, &magic, sizeof(magic), &read, NULL) != 0 && read == sizeof(magic);
+    if (!ok) {
+        CloseHandle(h);
+        return false;
+    }
+
+    WORD subsystem = IMAGE_SUBSYSTEM_WINDOWS_CUI;
+    LONG off = 0;
+    if (magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+        off = offsetof(IMAGE_OPTIONAL_HEADER32, Subsystem) - sizeof(WORD);
+    else if (magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+        off = offsetof(IMAGE_OPTIONAL_HEADER64, Subsystem) - sizeof(WORD);
+    else {
+        CloseHandle(h);
+        return false;
+    }
+
+    if (SetFilePointer(h, off, NULL, FILE_CURRENT) == INVALID_SET_FILE_POINTER && GetLastError() != NO_ERROR) {
+        CloseHandle(h);
+        return false;
+    }
+    ok = ReadFile(h, &subsystem, sizeof(subsystem), &read, NULL) != 0 && read == sizeof(subsystem);
+    CloseHandle(h);
+    return ok && subsystem == IMAGE_SUBSYSTEM_WINDOWS_GUI;
+}
+
+static bool shell_launch_file_open_detached(const std::wstring& path) {
+    SHELLEXECUTEINFOW sei = {};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = L"open";
+    sei.lpFile = path.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&sei))
+        return false;
+    if (sei.hProcess)
+        CloseHandle(sei.hProcess);
+    return true;
+}
+
+static bool shell_launch_gui_exe_detached(const std::wstring& exe_path, const std::string& rest) {
+    SHELLEXECUTEINFOW sei = {};
+    sei.cbSize = sizeof(sei);
+    sei.fMask = SEE_MASK_FLAG_NO_UI;
+    sei.lpVerb = L"open";
+    sei.lpFile = exe_path.c_str();
+    std::wstring params = to_wide(rest);
+    if (!params.empty())
+        sei.lpParameters = params.c_str();
+    sei.nShow = SW_SHOWNORMAL;
+    if (!ShellExecuteExW(&sei))
+        return false;
+    if (sei.hProcess)
+        CloseHandle(sei.hProcess);
+    return true;
+}
+
+static bool shell_try_detached_launch(const std::string& line, int& code_out) {
+    code_out = 1;
+
+    std::wstring path;
+    if (shell_resolve_existing_path(line, path)) {
+        DWORD attr = GetFileAttributesW(path.c_str());
+        if (attr != INVALID_FILE_ATTRIBUTES &&
+            (attr & FILE_ATTRIBUTE_DIRECTORY) == 0 &&
+            shell_is_non_wait_open_ext(shell_ext_lower(path))) {
+            if (shell_launch_file_open_detached(path)) {
+                code_out = 0;
+                return true;
+            }
+        }
+    }
+
+    std::string token, rest;
+    if (!shell_split_first_token(line, token, rest))
+        return false;
+    if (shell_has_meta(rest))
+        return false;
+
+    std::wstring exe_path;
+    if (!shell_resolve_exe_token(token, exe_path))
+        return false;
+    if (!shell_is_gui_exe(exe_path))
+        return false;
+
+    if (!shell_launch_gui_exe_detached(exe_path, rest))
+        return false;
+
+    code_out = 0;
+    return true;
+}
+
 // Runs an env-mutating command and imports the resulting environment into Zcmd's process.
 // Uses cmd /v:on so !errorlevel! captures the runtime exit code of the user command.
 static int run_capture_env(const std::string& line) {
@@ -354,7 +584,7 @@ int run_bash(const std::string& line) {
 int which(const std::string& arg) {
     std::string argl = arg;
     std::transform(argl.begin(), argl.end(), argl.begin(), ::tolower);
-    static const std::vector<std::string> builtins = {"ls","cd","pwd","cat","img","vid","exit","which","help","version","alias","unalias","play","resmon","yt"};
+    static const std::vector<std::string> builtins = {"ls","cd","pwd","cat","img","vid","edit","view","explore","exit","which","help","version","alias","unalias","play","resmon","yt"};
     for (auto& b : builtins) {
         if (argl == b) { out(arg + ": zcmd built-in\r\n"); return 0; }
     }

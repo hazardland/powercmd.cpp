@@ -7,6 +7,11 @@
 // dirs_only is set true when completing after "cd" so files are excluded.
 std::vector<std::wstring> complete(const std::wstring& prefix, bool dirs_only = false) {
     std::vector<std::wstring> result;
+    if (prefix.size() == 2 && iswalpha(prefix[0]) && prefix[1] == L':') {
+        result.push_back(prefix + L"/");
+        return result;
+    }
+
     std::wstring dir, name;
     size_t sep = prefix.find_last_of(L"\\/");
     if (sep == std::wstring::npos) { dir = L""; name = prefix; }

@@ -9,7 +9,7 @@
 static const int GUTTER = 4; // "%3d " — 3-digit line number + space
 static const char* EDIT_TOPBAR_BG = "\x1b[48;5;236m";
 static const char* EDIT_TOPBAR_FILE = "\x1b[48;5;236m\x1b[38;5;75m";
-static const char* EDIT_TOPBAR_META = "\x1b[48;5;236m\x1b[38;5;240m";
+static const char* EDIT_TOPBAR_META = "\x1b[48;5;236m" GRAY;
 static const char* EDIT_TOPBAR_RESET = "\x1b[49m\x1b[39m";
 
 struct edit_op {

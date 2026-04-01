@@ -1,5 +1,7 @@
 #pragma once
 
+#include <cstdint>
+
 // MODULE: dialog
 // Purpose : shared VT dialog state, palette, rendering, and key handling for fullscreen tools
 // Exports : DialogPalette DialogButton DialogState DialogEvent | dialog_open_*() dialog_close() dialog_draw() dialog_overlay_draw() dialog_handle_key() dialog_style_vt()
@@ -32,6 +34,7 @@ enum DIALOG_STYLE : WORD {
     DIALOG_STYLE_DETAIL,
     DIALOG_STYLE_LABEL,
     DIALOG_STYLE_INPUT,
+    DIALOG_STYLE_INPUT_SELECTED,
     DIALOG_STYLE_INPUT_CURSOR,
     DIALOG_STYLE_PROGRESS_TEXT,
     DIALOG_STYLE_PROGRESS_BAR,
@@ -59,6 +62,8 @@ struct DialogPalette {
     int label_bg = -1;
     int input_fg = 75;
     int input_bg = 236;
+    int input_selected_fg = 16;
+    int input_selected_bg = 75;
     int input_cursor_fg = 16;
     int input_cursor_bg = 226;
     int progress_text_fg = 229;
@@ -115,8 +120,10 @@ struct DialogState {
     std::wstring input_label;
     std::wstring input_value;
     int input_cursor = 0;
-    int progress_current = 0;
-    int progress_total = 0;
+    bool input_selected = false;
+    uint64_t progress_current = 0;
+    uint64_t progress_total = 0;
+    std::wstring progress_footer;
     std::vector<DialogButton> buttons;
     DialogPalette palette;
 };
@@ -167,8 +174,10 @@ static void dialog_open_message(DialogState& dialog, const std::wstring& title, 
     dialog.input_label.clear();
     dialog.input_value.clear();
     dialog.input_cursor = 0;
+    dialog.input_selected = false;
     dialog.progress_current = 0;
     dialog.progress_total = 0;
+    dialog.progress_footer.clear();
 }
 
 static void dialog_open_input(DialogState& dialog, const std::wstring& title, const std::wstring& summary,
@@ -182,14 +191,17 @@ static void dialog_open_input(DialogState& dialog, const std::wstring& title, co
     dialog.input_label = input_label;
     dialog.input_value = input_value;
     dialog.input_cursor = (int)dialog.input_value.size();
+    dialog.input_selected = !dialog.input_value.empty();
     dialog.buttons = buttons;
     dialog.palette = palette;
     dialog.progress_current = 0;
     dialog.progress_total = 0;
+    dialog.progress_footer.clear();
 }
 
 static void dialog_open_progress(DialogState& dialog, const std::wstring& title, const std::wstring& summary,
-    const std::wstring& detail, int current, int total, const DialogPalette& palette = dialog_palette_default()) {
+    const std::wstring& detail, uint64_t current, uint64_t total,
+    const std::wstring& footer = L"Working...", const DialogPalette& palette = dialog_palette_default()) {
     dialog.visible = true;
     dialog.layout = DIALOG_LAYOUT_PROGRESS;
     dialog.title = title;
@@ -200,8 +212,10 @@ static void dialog_open_progress(DialogState& dialog, const std::wstring& title,
     dialog.input_label.clear();
     dialog.input_value.clear();
     dialog.input_cursor = 0;
+    dialog.input_selected = false;
     dialog.progress_current = current;
     dialog.progress_total = total;
+    dialog.progress_footer = footer;
 }
 
 static std::wstring dialog_fit(const std::wstring& s, int width) {
@@ -330,6 +344,7 @@ static std::string dialog_style_vt(WORD attr, const DialogPalette& palette) {
     case DIALOG_STYLE_DETAIL:        return dialog_vt_fg_bg(palette.detail_fg, palette.detail_bg);
     case DIALOG_STYLE_LABEL:         return dialog_vt_fg_bg(palette.label_fg, palette.label_bg);
     case DIALOG_STYLE_INPUT:         return dialog_vt_fg_bg(palette.input_fg, palette.input_bg);
+    case DIALOG_STYLE_INPUT_SELECTED:return dialog_vt_fg_bg(palette.input_selected_fg, palette.input_selected_bg);
     case DIALOG_STYLE_INPUT_CURSOR:  return dialog_vt_fg_bg(palette.input_cursor_fg, palette.input_cursor_bg);
     case DIALOG_STYLE_PROGRESS_TEXT: return dialog_vt_fg_bg(palette.progress_text_fg, palette.progress_text_bg);
     case DIALOG_STYLE_PROGRESS_BAR:  return dialog_vt_fg_bg(palette.progress_bar_fg, palette.progress_bar_bg);
@@ -399,21 +414,24 @@ static void dialog_draw(std::vector<wchar_t>& chars, std::vector<WORD>& attrs, i
 
         int start = 0;
         std::wstring visible = dialog_input_tail(dialog.input_value, input_w, dialog.input_cursor, start);
-        dialog_text(chars, attrs, width, height, input_x, input_y, visible, DIALOG_STYLE_INPUT);
+        WORD input_attr = dialog.input_selected ? DIALOG_STYLE_INPUT_SELECTED : DIALOG_STYLE_INPUT;
+        dialog_text(chars, attrs, width, height, input_x, input_y, visible, input_attr);
 
-        int cursor_x = input_x + std::max(0, dialog.input_cursor - start);
-        if (cursor_x >= input_x + input_w) cursor_x = input_x + input_w - 1;
-        wchar_t cursor_ch = L' ';
-        if (dialog.input_cursor >= start && dialog.input_cursor < start + (int)visible.size())
-            cursor_ch = visible[dialog.input_cursor - start];
-        dialog_put(chars, attrs, width, height, cursor_x, input_y, cursor_ch, DIALOG_STYLE_INPUT_CURSOR);
+        if (!dialog.input_selected) {
+            int cursor_x = input_x + std::max(0, dialog.input_cursor - start);
+            if (cursor_x >= input_x + input_w) cursor_x = input_x + input_w - 1;
+            wchar_t cursor_ch = L' ';
+            if (dialog.input_cursor >= start && dialog.input_cursor < start + (int)visible.size())
+                cursor_ch = visible[dialog.input_cursor - start];
+            dialog_put(chars, attrs, width, height, cursor_x, input_y, cursor_ch, DIALOG_STYLE_INPUT_CURSOR);
+        }
     } else if (dialog.layout == DIALOG_LAYOUT_PROGRESS) {
         int bar_x = left + 2;
         int bar_y = top + 4;
         int bar_w = std::max(8, dialog_w - 4);
-        int total = std::max(1, dialog.progress_total);
-        int current = std::max(0, std::min(dialog.progress_current, total));
-        int filled = (bar_w * current) / total;
+        uint64_t total = std::max<uint64_t>(1, dialog.progress_total);
+        uint64_t current = std::min(dialog.progress_current, total);
+        int filled = (int)((bar_w * current) / total);
         dialog_fill(chars, attrs, width, height, bar_x, bar_y, bar_w, L' ', DIALOG_STYLE_PROGRESS_BAR);
         if (filled > 0)
             dialog_fill(chars, attrs, width, height, bar_x, bar_y, filled, L' ', DIALOG_STYLE_PROGRESS_FILL);
@@ -421,7 +439,7 @@ static void dialog_draw(std::vector<wchar_t>& chars, std::vector<WORD>& attrs, i
         std::wstring percent = std::to_wstring((current * 100) / total) + L"%";
         int percent_x = bar_x + std::max(0, (bar_w - (int)percent.size()) / 2);
         dialog_text(chars, attrs, width, height, percent_x, bar_y, percent, DIALOG_STYLE_PROGRESS_TEXT);
-        dialog_text(chars, attrs, width, height, left + 2, footer_y, dialog_fit(L"Working...", dialog_w - 4), DIALOG_STYLE_PROGRESS_TEXT);
+        dialog_text(chars, attrs, width, height, left + 2, footer_y, dialog_fit(dialog.progress_footer.empty() ? L"Working..." : dialog.progress_footer, dialog_w - 4), DIALOG_STYLE_PROGRESS_TEXT);
         return;
     }
 
@@ -502,27 +520,70 @@ static DialogEvent dialog_handle_key(DialogState& dialog, WORD vk, wchar_t ch, b
     if (dialog.layout != DIALOG_LAYOUT_INPUT)
         return event;
 
+    if (dialog.input_selected) {
+        if (!ctrl && vk == VK_LEFT) {
+            dialog.input_selected = false;
+            dialog.input_cursor = 0;
+            event.kind = DIALOG_EVENT_REDRAW;
+            return event;
+        }
+        if (!ctrl && vk == VK_RIGHT) {
+            dialog.input_selected = false;
+            dialog.input_cursor = (int)dialog.input_value.size();
+            event.kind = DIALOG_EVENT_REDRAW;
+            return event;
+        }
+        if (!ctrl && vk == VK_HOME) {
+            dialog.input_selected = false;
+            dialog.input_cursor = 0;
+            event.kind = DIALOG_EVENT_REDRAW;
+            return event;
+        }
+        if (!ctrl && vk == VK_END) {
+            dialog.input_selected = false;
+            dialog.input_cursor = (int)dialog.input_value.size();
+            event.kind = DIALOG_EVENT_REDRAW;
+            return event;
+        }
+        if (!ctrl && (vk == VK_BACK || vk == VK_DELETE || (ch >= 32 && ch != 127))) {
+            dialog.input_value.clear();
+            dialog.input_cursor = 0;
+            dialog.input_selected = false;
+            if (ch >= 32 && ch != 127) {
+                dialog.input_value.push_back(ch);
+                dialog.input_cursor = 1;
+            }
+            event.kind = DIALOG_EVENT_REDRAW;
+            return event;
+        }
+    }
+
     if (!ctrl && vk == VK_LEFT) {
+        dialog.input_selected = false;
         dialog.input_cursor = std::max(0, dialog.input_cursor - 1);
         event.kind = DIALOG_EVENT_REDRAW;
         return event;
     }
     if (!ctrl && vk == VK_RIGHT) {
+        dialog.input_selected = false;
         dialog.input_cursor = std::min((int)dialog.input_value.size(), dialog.input_cursor + 1);
         event.kind = DIALOG_EVENT_REDRAW;
         return event;
     }
     if (!ctrl && vk == VK_HOME) {
+        dialog.input_selected = false;
         dialog.input_cursor = 0;
         event.kind = DIALOG_EVENT_REDRAW;
         return event;
     }
     if (!ctrl && vk == VK_END) {
+        dialog.input_selected = false;
         dialog.input_cursor = (int)dialog.input_value.size();
         event.kind = DIALOG_EVENT_REDRAW;
         return event;
     }
     if (!ctrl && vk == VK_BACK) {
+        dialog.input_selected = false;
         if (dialog.input_cursor > 0) {
             dialog.input_value.erase(dialog.input_cursor - 1, 1);
             dialog.input_cursor--;
@@ -531,6 +592,7 @@ static DialogEvent dialog_handle_key(DialogState& dialog, WORD vk, wchar_t ch, b
         return event;
     }
     if (!ctrl && vk == VK_DELETE) {
+        dialog.input_selected = false;
         if (dialog.input_cursor < (int)dialog.input_value.size()) {
             dialog.input_value.erase(dialog.input_cursor, 1);
             event.kind = DIALOG_EVENT_REDRAW;
@@ -538,6 +600,7 @@ static DialogEvent dialog_handle_key(DialogState& dialog, WORD vk, wchar_t ch, b
         return event;
     }
     if (!ctrl && ch >= 32 && ch != 127) {
+        dialog.input_selected = false;
         dialog.input_value.insert(dialog.input_cursor, 1, ch);
         dialog.input_cursor++;
         event.kind = DIALOG_EVENT_REDRAW;
