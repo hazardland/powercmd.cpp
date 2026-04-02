@@ -314,9 +314,24 @@ static std::wstring explore_lower(const std::wstring& s) {
 
 static std::wstring explore_fit(const std::wstring& s, int width) {
     if (width <= 0) return L"";
-    if ((int)s.size() <= width) return s;
+    if (ui_text_width(s) <= width) return s;
     if (width <= 3) return std::wstring(width, L'.');
-    return s.substr(0, width - 3) + L"...";
+
+    std::wstring out;
+    int used = 0;
+    int limit = width - 3;
+    for (int i = 0; i < (int)s.size();) {
+        int units = 0;
+        uint32_t cp = ui_codepoint_at(s, i, &units);
+        if (units <= 0) break;
+        int cw = std::max(1, ui_char_width(cp));
+        if (used + cw > limit)
+            break;
+        out.append(s, i, units);
+        used += cw;
+        i += units;
+    }
+    return out + L"...";
 }
 
 static std::wstring explore_trim(const std::wstring& s) {
@@ -879,8 +894,22 @@ static void explore_fill(std::vector<wchar_t>& chars, std::vector<WORD>& attrs,
 
 static void explore_text(std::vector<wchar_t>& chars, std::vector<WORD>& attrs,
     int width, int height, int x, int y, const std::wstring& text, WORD attr) {
-    for (int i = 0; i < (int)text.size(); i++)
-        explore_put(chars, attrs, width, height, x + i, y, text[i], attr);
+    int cx = x;
+    for (int i = 0; i < (int)text.size();) {
+        int units = 0;
+        uint32_t cp = ui_codepoint_at(text, i, &units);
+        if (units <= 0) break;
+        int cw = std::max(1, ui_char_width(cp));
+        if (cx >= width || cx + cw > width)
+            break;
+
+        explore_put(chars, attrs, width, height, cx, y, text[i], attr);
+        for (int fill = 1; fill < cw; fill++)
+            explore_put(chars, attrs, width, height, cx + fill, y, 0, attr);
+
+        cx += cw;
+        i += units;
+    }
 }
 
 static void explore_draw_panel(std::vector<wchar_t>& chars, std::vector<WORD>& attrs,
@@ -894,7 +923,7 @@ static void explore_draw_panel(std::vector<wchar_t>& chars, std::vector<WORD>& a
     explore_text(chars, attrs, width, height, inner_x, 1, path, head_attr);
     std::wstring sort_badge = L"[" + explore_sort_mode_label(panel.sort_mode) + L"]";
     sort_badge = explore_fit(sort_badge, inner_w);
-    int sort_x = inner_x + std::max(0, inner_w - (int)sort_badge.size());
+    int sort_x = inner_x + std::max(0, inner_w - ui_text_width(sort_badge));
     explore_text(chars, attrs, width, height, sort_x, 1, sort_badge, panel.active ? EXPLORER_BADGE : EXPLORER_BORDER_INACTIVE);
 
     if (explore_any_filter_row()) {
@@ -949,29 +978,25 @@ static void explore_draw_panel(std::vector<wchar_t>& chars, std::vector<WORD>& a
         }
 
         int text_w = std::max(0, inner_w - 1);
-        int prefix_w = std::min(text_w, (int)prefix.size());
+        int prefix_w = std::min(text_w, ui_text_width(prefix));
         int name_w = std::max(0, text_w - prefix_w);
-        std::wstring visible_name = name_w > 0 ? name.substr(0, name_w) : L"";
-        if (name_w > 0 && (int)name.size() > name_w)
+        std::wstring visible_name = name_w > 0 ? explore_fit(name, name_w) : L"";
+        if (false && name_w > 0 && (int)name.size() > name_w)
             visible_name[name_w - 1] = L'…';
-        for (int i = 0; i < prefix_w; i++) {
-            WORD attr = EXPLORER_PATH;
-            if (is_cursor)
-                attr = selected_entry ? EXPLORER_CURSOR_SELECTED : EXPLORER_CURSOR_BG;
-            explore_put(chars, attrs, width, height, inner_x + i, y, prefix[i], attr);
-        }
-        for (int i = 0; i < (int)visible_name.size(); i++) {
-            WORD attr = name_attr;
-            if (is_cursor)
-                attr = selected_entry ? EXPLORER_CURSOR_SELECTED : EXPLORER_CURSOR_BG;
-            explore_put(chars, attrs, width, height, inner_x + prefix_w + i, y, visible_name[i], attr);
-        }
+        WORD prefix_attr = EXPLORER_PATH;
+        if (is_cursor)
+            prefix_attr = selected_entry ? EXPLORER_CURSOR_SELECTED : EXPLORER_CURSOR_BG;
+        explore_text(chars, attrs, width, height, inner_x, y, prefix, prefix_attr);
+        WORD text_attr = name_attr;
+        if (is_cursor)
+            text_attr = selected_entry ? EXPLORER_CURSOR_SELECTED : EXPLORER_CURSOR_BG;
+        explore_text(chars, attrs, width, height, inner_x + prefix_w, y, visible_name, text_attr);
     }
 
     if (!panel.selected.empty()) {
         std::wstring badge = L"[" + std::to_wstring(panel.selected.size()) + L" selected]";
         badge = explore_fit(badge, inner_w);
-        int badge_x = inner_x + std::max(0, inner_w - (int)badge.size());
+        int badge_x = inner_x + std::max(0, inner_w - ui_text_width(badge));
         int badge_y = height - 3;
         int badge_idx = panel.scroll + (badge_y - explore_entries_y());
         bool badge_on_cursor = panel.active && badge_idx == panel.cursor;
@@ -1061,7 +1086,8 @@ static void explore_present(const std::vector<wchar_t>& chars, const std::vector
                 frame += explore_style_vt(next);
                 style = next;
             }
-            run.push_back(chars[idx]);
+            if (chars[idx] != 0)
+                run.push_back(chars[idx]);
         }
         if (!run.empty())
             frame += to_utf8(run);

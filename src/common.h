@@ -162,3 +162,65 @@ void clipboard_set(const std::wstring& text) {
     }
     CloseClipboard();
 }
+
+static bool ui_is_combining(uint32_t cp) {
+    return
+        (cp >= 0x0300 && cp <= 0x036F) ||
+        (cp >= 0x1AB0 && cp <= 0x1AFF) ||
+        (cp >= 0x1DC0 && cp <= 0x1DFF) ||
+        (cp >= 0x20D0 && cp <= 0x20FF) ||
+        (cp >= 0xFE20 && cp <= 0xFE2F);
+}
+
+static bool ui_is_wide(uint32_t cp) {
+    return
+        (cp >= 0x1100 && cp <= 0x115F) ||
+        cp == 0x2329 || cp == 0x232A ||
+        (cp >= 0x2E80 && cp <= 0x303E) ||
+        (cp >= 0x3040 && cp <= 0xA4CF) ||
+        (cp >= 0xAC00 && cp <= 0xD7A3) ||
+        (cp >= 0xF900 && cp <= 0xFAFF) ||
+        (cp >= 0xFE10 && cp <= 0xFE19) ||
+        (cp >= 0xFE30 && cp <= 0xFE6F) ||
+        (cp >= 0xFF00 && cp <= 0xFF60) ||
+        (cp >= 0xFFE0 && cp <= 0xFFE6) ||
+        (cp >= 0x1F300 && cp <= 0x1FAFF);
+}
+
+static int ui_char_width(uint32_t cp) {
+    if (cp == 0 || cp == '\n' || cp == '\r')
+        return 0;
+    if (cp < 32 || (cp >= 0x7F && cp < 0xA0))
+        return 0;
+    if (ui_is_combining(cp))
+        return 0;
+    return ui_is_wide(cp) ? 2 : 1;
+}
+
+static uint32_t ui_codepoint_at(const std::wstring& s, int i, int* units = nullptr) {
+    if (units) *units = 0;
+    if (i < 0 || i >= (int)s.size())
+        return 0;
+    wchar_t w1 = s[i];
+    if (w1 >= 0xD800 && w1 <= 0xDBFF && i + 1 < (int)s.size()) {
+        wchar_t w2 = s[i + 1];
+        if (w2 >= 0xDC00 && w2 <= 0xDFFF) {
+            if (units) *units = 2;
+            return 0x10000u + (((uint32_t)(w1 - 0xD800) << 10) | (uint32_t)(w2 - 0xDC00));
+        }
+    }
+    if (units) *units = 1;
+    return (uint32_t)w1;
+}
+
+static int ui_text_width(const std::wstring& s) {
+    int width = 0;
+    for (int i = 0; i < (int)s.size();) {
+        int units = 0;
+        uint32_t cp = ui_codepoint_at(s, i, &units);
+        if (units <= 0) break;
+        width += ui_char_width(cp);
+        i += units;
+    }
+    return width;
+}

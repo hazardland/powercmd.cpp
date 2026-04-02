@@ -152,7 +152,8 @@ void ls(const std::string& arg, const std::string& filter = "") {
     if (!show_size && !show_time) {
         int max_w = 0;
         for (auto& e : all) {
-            int w = (int)e.name.size() + (e.is_dir ? 1 : 0);
+            std::wstring disp_w = e.name + (e.is_dir ? L"/" : L"");
+            int w = ui_text_width(disp_w);
             if (w > max_w) max_w = w;
         }
         int col_w = max_w + 2;
@@ -165,8 +166,9 @@ void ls(const std::string& arg, const std::string& filter = "") {
                 int idx = c * nrows + r;
                 if (idx >= (int)all.size()) break;
                 auto& e = all[idx];
-                std::string disp = to_utf8(e.name) + (e.is_dir ? "/" : "");
-                int pad = col_w - (int)disp.size();
+                std::wstring disp_w = e.name + (e.is_dir ? L"/" : L"");
+                std::string disp = to_utf8(disp_w);
+                int pad = col_w - ui_text_width(disp_w);
                 if (!e.color.empty()) row += e.color;
                 row += disp;
                 if (!e.color.empty()) row += RESET;
@@ -196,13 +198,15 @@ void ls(const std::string& arg, const std::string& filter = "") {
 
     int max_w = 0;
     for (auto& e : all) {
-        int w = (int)e.name.size() + (e.is_dir ? 1 : 0);
+        std::wstring disp_w = e.name + (e.is_dir ? L"/" : L"");
+        int w = ui_text_width(disp_w);
         if (w > max_w) max_w = w;
     }
 
     for (auto& e : all) {
-        std::string name = to_utf8(e.name) + (e.is_dir ? "/" : "");
-        int vis_w = (int)e.name.size() + (e.is_dir ? 1 : 0);
+        std::wstring disp_w = e.name + (e.is_dir ? L"/" : L"");
+        std::string name = to_utf8(disp_w);
+        int vis_w = ui_text_width(disp_w);
         std::string row;
         if (!e.color.empty()) row += e.color;
         row += name;

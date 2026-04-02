@@ -321,9 +321,17 @@ static int row_of(const std::wstring& buf, int p) {
 // Column within the current logical row at flat offset p (0-based).
 static int col_of(const std::wstring& buf, int p) {
     int c = 0;
-    for (int i = 0; i < p && i < (int)buf.size(); i++) {
-        if (buf[i] == L'\n') c = 0;
-        else c++;
+    for (int i = 0; i < p && i < (int)buf.size();) {
+        if (buf[i] == L'\n') {
+            c = 0;
+            i++;
+        } else {
+            int units = 0;
+            uint32_t cp = ui_codepoint_at(buf, i, &units);
+            if (units <= 0) break;
+            c += ui_char_width(cp);
+            i += units;
+        }
     }
     return c;
 }
@@ -347,9 +355,27 @@ static int row_count(const std::wstring& buf) {
 // Physical screen rows from the start of input down to flat offset p.
 static int phys_rows(const std::wstring& buf, int p, int prompt_vis, int width) {
     int rows = 0, col = prompt_vis;
-    for (int i = 0; i < p && i < (int)buf.size(); i++) {
-        if (buf[i] == L'\n') { rows++; col = 2; }
-        else { col++; if (col >= width) { rows++; col = 0; } }
+    for (int i = 0; i < p && i < (int)buf.size();) {
+        if (buf[i] == L'\n') {
+            rows++;
+            col = 2;
+            i++;
+        } else {
+            int units = 0;
+            uint32_t cp = ui_codepoint_at(buf, i, &units);
+            if (units <= 0) break;
+            int cw = std::max(1, ui_char_width(cp));
+            if (col + cw > width) {
+                rows++;
+                col = 0;
+            }
+            col += cw;
+            if (col >= width) {
+                rows++;
+                col = 0;
+            }
+            i += units;
+        }
     }
     return rows;
 }
@@ -357,9 +383,22 @@ static int phys_rows(const std::wstring& buf, int p, int prompt_vis, int width) 
 // Physical screen column (0-based) at flat offset p. Continuation rows start at col 2.
 static int phys_col(const std::wstring& buf, int p, int prompt_vis, int width) {
     int col = prompt_vis;
-    for (int i = 0; i < p && i < (int)buf.size(); i++) {
-        if (buf[i] == L'\n') { col = 2; }
-        else { col++; if (col >= width) col = 0; }
+    for (int i = 0; i < p && i < (int)buf.size();) {
+        if (buf[i] == L'\n') {
+            col = 2;
+            i++;
+        } else {
+            int units = 0;
+            uint32_t cp = ui_codepoint_at(buf, i, &units);
+            if (units <= 0) break;
+            int cw = std::max(1, ui_char_width(cp));
+            if (col + cw > width)
+                col = 0;
+            col += cw;
+            if (col >= width)
+                col = 0;
+            i += units;
+        }
     }
     return col;
 }
@@ -372,7 +411,20 @@ static std::wstring shown_hint(const input& e) {
     int remaining = width - end_col;
     if (remaining <= 1)
         return L"";
-    return e.hint.substr(0, std::min((int)e.hint.size(), remaining - 1));
+    int keep = 0;
+    int used = 0;
+    for (int i = 0; i < (int)e.hint.size();) {
+        int units = 0;
+        uint32_t cp = ui_codepoint_at(e.hint, i, &units);
+        if (units <= 0) break;
+        int cw = std::max(1, ui_char_width(cp));
+        if (used + cw > remaining - 1)
+            break;
+        used += cw;
+        i += units;
+        keep = i;
+    }
+    return e.hint.substr(0, keep);
 }
 
 // Redraws the entire input line in place: moves up to the prompt row, clears to end of screen,
@@ -434,6 +486,8 @@ void redraw(input& e) {
 static bool fast_backspace_paint(input& e, const std::wstring& old_buf) {
     if (old_buf.find(L'\n') != std::wstring::npos || e.buf.find(L'\n') != std::wstring::npos)
         return false;
+    if (ui_text_width(old_buf) != (int)old_buf.size() || ui_text_width(e.buf) != (int)e.buf.size())
+        return false;
 
     int width = term_width();
     if (phys_rows(old_buf, (int)old_buf.size(), e.prompt_vis, width) != 0)
@@ -446,7 +500,7 @@ static bool fast_backspace_paint(input& e, const std::wstring& old_buf) {
     if (!hint.empty()) {
         s += GRAY + to_utf8(hint) + RESET;
         char esc[32];
-        snprintf(esc, sizeof(esc), "\x1b[%dD", (int)hint.size());
+        snprintf(esc, sizeof(esc), "\x1b[%dD", ui_text_width(hint));
         s += esc;
     }
     out(s);
